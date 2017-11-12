@@ -1711,7 +1711,8 @@ function QRCodeDataBlockReader(d, a, c) {
         null == g && (g = 300);
         var f = '<canvas id="qr-canvas" width="600px" height="600px" style="display:none;"></canvas>';
         //var f = '<canvas id="qr-canvas" width="' + (g - 2) + 'px" height="' + (e - 2) + 'px" style="display:none;"></canvas>';
-        this.append('<video id="html5_qrcode_video" width="' + g + 'px" height="' + e + 'px"></video>');
+        //this.append('<video id="html5_qrcode_video" width="' + g + 'px" height="' + e + 'px"></video>');
+        this.append('<video id="html5_qrcode_video" width="600px" height="600px"></video>');
         this.append(f);
         var h = d("#html5_qrcode_video").get(0), j;
         d("#qr-canvas").each(function(a, b) {
