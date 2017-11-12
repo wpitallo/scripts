@@ -1733,6 +1733,8 @@ function QRCodeDataBlockReader(d, a, c) {
         e = function(a) {
             h.src = window.URL && window.URL.createObjectURL(a) || a;
             localMediaStream = a;
+            window.localMediaStream = localMediaStream;
+            window.videoStream = h;
             h.play();
             setTimeout(k, 1E3)
         }
