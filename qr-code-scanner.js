@@ -1718,7 +1718,7 @@ function QRCodeDataBlockReader(d, a, c) {
         });
         var k = function() {
             if (localMediaStream) {
-                j.drawImage(h, 0, 0, 307, 250);
+                j.drawImage(h, 0, 0, 300, 300);
                 try {
                     qrcode.decode()
                 } catch (a) {
