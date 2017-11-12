@@ -1707,7 +1707,7 @@ function QRCodeDataBlockReader(d, a, c) {
     d.fn.html5_qrcode = function(a, c, b) {
         var e = this.height()
           , g = this.width();
-        null == e && (e = 300);
+        null == e && (e = 250);
         null == g && (g = 300);
         var f = '<canvas id="qr-canvas" width="' + (g - 2) + 'px" height="' + (e - 2) + 'px" style="display:none;"></canvas>';
         this.append('<video id="html5_qrcode_video" width="' + g + 'px" height="' + e + 'px"></video>');
@@ -1718,7 +1718,7 @@ function QRCodeDataBlockReader(d, a, c) {
         });
         var k = function() {
             if (localMediaStream) {
-                j.drawImage(h, 0, 0, 300, 300);
+                j.drawImage(h, 0, 0, 307, 250);
                 try {
                     qrcode.decode()
                 } catch (a) {
