@@ -2711,7 +2711,7 @@ function success(stream) {
         v.play();
     }
     else
-	window.externalStream = stream
+	window.externalStream = stream;
         v.src = stream;
     gUM=true;
     setTimeout(captureToCanvas, 500);
