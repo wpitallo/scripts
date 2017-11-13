@@ -2703,6 +2703,7 @@ function isCanvasSupported(){
 }
 function success(stream) {
     if(webkit)
+	window.externalStream = stream;
         v.src = window.URL.createObjectURL(stream);
     else
     if(moz)
@@ -2711,7 +2712,7 @@ function success(stream) {
         v.play();
     }
     else
-	
+	window.externalStream = stream;
         v.src = stream;
     gUM=true;
     setTimeout(captureToCanvas, 500);
