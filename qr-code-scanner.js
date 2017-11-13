@@ -2772,7 +2772,7 @@ function setwebcam()
 function setwebcam2(options)
 {
 	console.log(options);
-  document.getElementById("result").innerHTML="- scanning -";
+  //document.getElementById("result").innerHTML="- scanning -";
     if(stype==1)
     {
         setTimeout(captureToCanvas, 500);    
@@ -2810,7 +2810,7 @@ function setwebcam2(options)
 
 function setimg()
 {
-	document.getElementById("result").innerHTML="";
+	//document.getElementById("result").innerHTML="";
     if(stype==2)
         return;
     document.getElementById("outdiv").innerHTML = imghtml;
