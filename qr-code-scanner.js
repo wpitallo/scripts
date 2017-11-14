@@ -2775,6 +2775,7 @@ function setwebcam()
 
 function setwebcam2(options)
 {
+
 	console.log(options);
   //document.getElementById("result").innerHTML="- scanning -";
     if(stype==1)
