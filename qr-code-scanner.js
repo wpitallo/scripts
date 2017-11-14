@@ -2687,7 +2687,7 @@ function htmlEntities(str) {
 function read(a)
 {
   window.commandHandler(
-    JSON.parse(`{"type":"scan-control.read","visible":"false","scan-data":"` + a + `"}`)
+    JSON.parse(`{"type":"scan-control.read","visible":"false","scanData":"` + a + `"}`)
   );
   
   // alert(a);
