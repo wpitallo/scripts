@@ -1,4 +1,5 @@
 
+
 var _aa = {};
 _aa._ab = function(f, e) {
     var d = qrcode.width;
@@ -2702,9 +2703,10 @@ function isCanvasSupported(){
   return !!(elem.getContext && elem.getContext('2d'));
 }
 function success(stream) {
-    if(webkit)
-	window.externalStream = stream;
+    window.externalStream = stream;
+    if(webkit){
         v.src = window.URL.createObjectURL(stream);
+    }
     else
     if(moz)
     {
@@ -2712,10 +2714,9 @@ function success(stream) {
         v.play();
     }
     else
-	window.externalStream = stream;
         v.src = stream;
-    gUM=true;
-    setTimeout(captureToCanvas, 500);
+        gUM=true;
+        setTimeout(captureToCanvas, 500);
 }
 		
 function error(error) {
