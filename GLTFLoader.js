@@ -47,7 +47,7 @@
 
     parse: function( json, callback, path ) {
 
-      console.time( 'GLTFLoader' );
+      var GLTFLoaderStartTime = performance.now()
 
       var glTFParser = new this.parser( json, {
         path: path || this.path,
@@ -56,7 +56,7 @@
 
       glTFParser.parse( function( scene, cameras, animations ) {
 
-        console.timeEnd( 'GLTFLoader' );
+        spellBook.writeThirdPartyPerformanceGroupLogs('GLTFLoader',GLTFLoaderStartTime, performance.now()) 
 
         var glTF = {
           "scene": scene,
