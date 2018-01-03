@@ -19347,7 +19347,7 @@
 
 	function WebGLRenderer( parameters ) {
 
-		spellBook.thirdPartyLog( 'THREE.WebGLRenderer Revision', REVISION );
+		spellBook.thirdPartyLog( 'THREE.WebGLRenderer Revision: ' + REVISION);
 
 		parameters = parameters || {};
 
