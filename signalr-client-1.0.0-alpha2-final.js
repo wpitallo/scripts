@@ -165,7 +165,8 @@ class HttpClient {
                     reject(new HttpError_1.HttpError(xhr.statusText, xhr.status));
                 }
             };
-            xhr.onerror = () => {
+            xhr.onerror = (e) => {
+                debugger
                 reject(new HttpError_1.HttpError(xhr.statusText, xhr.status));
             };
         });
