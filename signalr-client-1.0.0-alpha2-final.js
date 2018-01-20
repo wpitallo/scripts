@@ -328,6 +328,7 @@ exports.HttpConnection = HttpConnection;
 Object.defineProperty(exports, "__esModule", { value: true });
 class HttpError extends Error {
     constructor(errorMessage, statusCode) {
+        debugger
         super(errorMessage);
         this.statusCode = statusCode;
     }
