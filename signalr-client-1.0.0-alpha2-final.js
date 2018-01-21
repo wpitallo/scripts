@@ -166,7 +166,6 @@ class HttpClient {
                 }
             };
             xhr.onerror = (e) => {
-                debugger
                 reject(new HttpError_1.HttpError(xhr.statusText, xhr.status));
             };
         });
@@ -329,7 +328,6 @@ exports.HttpConnection = HttpConnection;
 Object.defineProperty(exports, "__esModule", { value: true });
 class HttpError extends Error {
     constructor(errorMessage, statusCode) {
-        debugger
         super(errorMessage);
         this.statusCode = statusCode;
     }
