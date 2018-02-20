@@ -2,1743 +2,2651 @@
  * @author Rich Tibbett / https://github.com/richtr
  * @author mrdoob / http://mrdoob.com/
  * @author Tony Parisi / http://www.tonyparisi.com/
+ * @author Takahiro / https://github.com/takahirox
+ * @author Don McCurdy / https://www.donmccurdy.com
  */
 
-(function() {
+THREE.GLTFLoader = ( function () {
 
-  THREE.GLTFLoader = function( manager ) {
+	function GLTFLoader( manager ) {
 
-    this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
+		this.manager = ( manager !== undefined ) ? manager : THREE.DefaultLoadingManager;
 
-    this.parser = GLTFParser;
+	}
 
-  };
+	GLTFLoader.prototype = {
 
-  THREE.GLTFLoader.prototype = {
+		constructor: GLTFLoader,
 
-    constructor: THREE.GLTFLoader,
+		crossOrigin: 'Anonymous',
 
-    load: function( url, onLoad, onProgress, onError ) {
+		load: function ( url, onLoad, onProgress, onError ) {
 
-      var scope = this;
+			var scope = this;
 
-      var path = this.path && ( typeof this.path === "string" ) ? this.path : THREE.Loader.prototype.extractUrlBase( url );
+			var path = this.path !== undefined ? this.path : THREE.LoaderUtils.extractUrlBase( url );
 
-      var loader = new THREE.XHRLoader( scope.manager );
-      loader.load( url, function( text ) {
+			var loader = new THREE.FileLoader( scope.manager );
 
-        scope.parse( JSON.parse( text ), onLoad, path );
+			loader.setResponseType( 'arraybuffer' );
 
-      }, onProgress, onError );
+			loader.load( url, function ( data ) {
 
-    },
+				try {
 
-    setCrossOrigin: function( value ) {
+					scope.parse( data, path, onLoad, onError );
 
-      this.crossOrigin = value;
+				} catch ( e ) {
 
-    },
+					if ( onError !== undefined ) {
 
-    setPath: function( value ) {
+						onError( e );
 
-      this.path = value;
+					} else {
 
-    },
+						throw e;
 
-    parse: function( json, callback, path ) {
+					}
 
-      var GLTFLoaderStartTime = performance.now()
+				}
 
-      var glTFParser = new this.parser( json, {
-        path: path || this.path,
-        crossOrigin: !!this.crossOrigin
-      });
+			}, onProgress, onError );
 
-      glTFParser.parse( function( scene, cameras, animations ) {
+		},
 
-        spellBook.writeThirdPartyPerformanceGroupLogs('GLTFLoader',GLTFLoaderStartTime, performance.now()) 
+		setCrossOrigin: function ( value ) {
 
-        var glTF = {
-          "scene": scene,
-          "cameras": cameras,
-          "animations": animations
-        };
+			this.crossOrigin = value;
+			return this;
 
-        callback( glTF );
+		},
 
-      });
+		setPath: function ( value ) {
 
-      // Developers should use `callback` argument for async notification on
-      // completion to prevent side effects.
-      // Function return is kept only for backward-compatability purposes.
-      return {
-        get scene() {
+			this.path = value;
+			return this;
 
-          console.warn( "Synchronous glTF object access is deprecated." +
-            " Use the asynchronous 'callback' argument instead." );
-          return scene;
+		},
 
-        },
-        set scene( value ) {
+		parse: function ( data, path, onLoad, onError ) {
 
-          console.warn( "Synchronous glTF object access is deprecated." +
-            " Use the asynchronous 'callback' argument instead." );
-          scene = value;
+			var content;
+			var extensions = {};
 
-        }
+			if ( typeof data === 'string' ) {
 
-      };
+				content = data;
 
-    }
+			} else {
 
-  };
+				var magic = THREE.LoaderUtils.decodeText( new Uint8Array( data, 0, 4 ) );
 
-  /* GLTFREGISTRY */
+				if ( magic === BINARY_EXTENSION_HEADER_MAGIC ) {
 
-  var GLTFRegistry = function() {
+					try {
 
-    var objects = {};
+						extensions[ EXTENSIONS.KHR_BINARY_GLTF ] = new GLTFBinaryExtension( data );
 
-    return	{
-      get : function( key ) {
+					} catch ( error ) {
 
-        return objects[ key ];
+						if ( onError ) onError( error );
+						return;
 
-      },
+					}
 
-      add : function( key, object ) {
+					content = extensions[ EXTENSIONS.KHR_BINARY_GLTF ].content;
 
-        objects[ key ] = object;
+				} else {
 
-      },
+					content = THREE.LoaderUtils.decodeText( new Uint8Array( data ) );
 
-      remove: function( key ) {
+				}
 
-        delete objects[ key ];
+			}
 
-      },
+			var json = JSON.parse( content );
 
-      removeAll: function() {
+			if ( json.asset === undefined || json.asset.version[ 0 ] < 2 ) {
 
-        objects = {};
+				if ( onError ) onError( new Error( 'THREE.GLTFLoader: Unsupported asset. glTF versions >=2.0 are supported. Use LegacyGLTFLoader instead.' ) );
+				return;
 
-      },
+			}
 
-      update : function( scene, camera ) {
+			if ( json.extensionsUsed ) {
 
-        _each( objects, function( object ) {
+				if ( json.extensionsUsed.indexOf( EXTENSIONS.KHR_LIGHTS ) >= 0 ) {
 
-          if ( object.update ) {
+					extensions[ EXTENSIONS.KHR_LIGHTS ] = new GLTFLightsExtension( json );
 
-            object.update( scene, camera );
+				}
 
-          }
+				if ( json.extensionsUsed.indexOf( EXTENSIONS.KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS ) >= 0 ) {
 
-        });
+					extensions[ EXTENSIONS.KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS ] = new GLTFMaterialsPbrSpecularGlossinessExtension();
 
-      }
-    };
-  };
+				}
 
-  /* GLTFSHADERS */
+			}
 
-  THREE.GLTFLoader.Shaders = new GLTFRegistry();
+			console.time( 'GLTFLoader' );
 
-  /* GLTFSHADER */
+			var parser = new GLTFParser( json, extensions, {
 
-  var GLTFShader = function( targetNode, allNodes ) {
+				path: path || this.path || '',
+				crossOrigin: this.crossOrigin,
+				manager: this.manager
 
-    this.boundUniforms = {};
+			} );
 
-    // bind each uniform to its source node
-    _each(targetNode.material.uniforms, function(uniform, uniformId) {
+			parser.parse( function ( scene, scenes, cameras, animations, asset ) {
 
-      if (uniform.semantic) {
+				console.timeEnd( 'GLTFLoader' );
 
-        var sourceNodeRef = uniform.node;
+				var glTF = {
+					scene: scene,
+					scenes: scenes,
+					cameras: cameras,
+					animations: animations,
+					asset: asset
+				};
 
-        var sourceNode = targetNode;
-        if ( sourceNodeRef ) {
-          sourceNode = allNodes[ sourceNodeRef ];
-        }
+				onLoad( glTF );
 
-        this.boundUniforms[ uniformId ] = {
-          semantic: uniform.semantic,
-          sourceNode: sourceNode,
-          targetNode: targetNode,
-          uniform: uniform
-        };
+			}, onError );
 
-      }
+		}
 
-    }.bind( this ));
+	};
 
-    this._m4 = new THREE.Matrix4();
+	/* GLTFREGISTRY */
 
-  }
+	function GLTFRegistry() {
 
-  // Update - update all the uniform values
-  GLTFShader.prototype.update = function( scene, camera ) {
+		var objects = {};
 
-    // update scene graph
+		return	{
 
-    scene.updateMatrixWorld();
+			get: function ( key ) {
 
-    // update camera matrices and frustum
+				return objects[ key ];
 
-    camera.updateMatrixWorld();
-    camera.matrixWorldInverse.getInverse( camera.matrixWorld );
+			},
 
-    _each( this.boundUniforms, function( boundUniform ) {
+			add: function ( key, object ) {
 
-      switch (boundUniform.semantic) {
+				objects[ key ] = object;
 
-        case "MODELVIEW":
+			},
 
-          var m4 = boundUniform.uniform.value;
-          m4.multiplyMatrices(camera.matrixWorldInverse,
-            boundUniform.sourceNode.matrixWorld);
-          break;
+			remove: function ( key ) {
 
-        case "MODELVIEWINVERSETRANSPOSE":
+				delete objects[ key ];
 
-          var m3 = boundUniform.uniform.value;
-          this._m4.multiplyMatrices(camera.matrixWorldInverse,
-            boundUniform.sourceNode.matrixWorld);
-          m3.getNormalMatrix(this._m4);
-          break;
+			},
 
-        case "PROJECTION":
+			removeAll: function () {
 
-          var m4 = boundUniform.uniform.value;
-          m4.copy(camera.projectionMatrix);
-          break;
+				objects = {};
 
-        case "JOINTMATRIX":
+			}
 
-          var m4v = boundUniform.uniform.value;
-          for (var mi = 0; mi < m4v.length; mi++) {
-            // So it goes like this:
-            // SkinnedMesh world matrix is already baked into MODELVIEW;
-            // ransform joints to local space,
-            // then transform using joint's inverse
-            m4v[mi]
-              .getInverse(boundUniform.sourceNode.matrixWorld)
-              .multiply(boundUniform.targetNode.skeleton.bones[ mi ].matrixWorld)
-              .multiply(boundUniform.targetNode.skeleton.boneInverses[mi]);
-          }
-          break;
+		};
 
-        default :
+	}
 
-          console.warn("Unhandled shader semantic: " + boundUniform.semantic);
-          break;
+	/*********************************/
+	/********** EXTENSIONS ***********/
+	/*********************************/
 
-      }
+	var EXTENSIONS = {
+		KHR_BINARY_GLTF: 'KHR_binary_glTF',
+		KHR_LIGHTS: 'KHR_lights',
+		KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS: 'KHR_materials_pbrSpecularGlossiness'
+	};
 
-    }.bind( this ));
+	/**
+	 * Lights Extension
+	 *
+	 * Specification: PENDING
+	 */
+	function GLTFLightsExtension( json ) {
 
-  };
+		this.name = EXTENSIONS.KHR_LIGHTS;
 
+		this.lights = {};
 
-  /* GLTFANIMATION */
+		var extension = ( json.extensions && json.extensions[ EXTENSIONS.KHR_LIGHTS ] ) || {};
+		var lights = extension.lights || {};
 
-  THREE.GLTFLoader.Animations = new GLTFRegistry();
+		for ( var lightId in lights ) {
 
-  // Construction/initialization
-  var GLTFAnimation = function( interps ) {
+			var light = lights[ lightId ];
+			var lightNode;
 
-    this.running = false;
-    this.loop = false;
-    this.duration = 0;
-    this.startTime = 0;
-    this.interps = [];
+			var color = new THREE.Color().fromArray( light.color );
 
-    this.uuid = THREE.Math.generateUUID();
+			switch ( light.type ) {
 
-    if ( interps ) {
+				case 'directional':
+					lightNode = new THREE.DirectionalLight( color );
+					lightNode.position.set( 0, 0, 1 );
+					break;
 
-      this.createInterpolators( interps );
+				case 'point':
+					lightNode = new THREE.PointLight( color );
+					break;
 
-    }
+				case 'spot':
+					lightNode = new THREE.SpotLight( color );
+					lightNode.position.set( 0, 0, 1 );
+					break;
 
-  };
+				case 'ambient':
+					lightNode = new THREE.AmbientLight( color );
+					break;
 
-  GLTFAnimation.prototype.createInterpolators = function( interps ) {
+			}
 
-    for ( var i = 0, len = interps.length; i < len; i ++ ) {
+			if ( lightNode ) {
 
-      var interp = new GLTFInterpolator( interps[ i ] );
-      this.interps.push( interp );
-      this.duration = Math.max( this.duration, interp.duration );
+				if ( light.constantAttenuation !== undefined ) {
 
-    }
+					lightNode.intensity = light.constantAttenuation;
 
-  }
+				}
 
-  // Start/stop
-  GLTFAnimation.prototype.play = function() {
+				if ( light.linearAttenuation !== undefined ) {
 
-    if ( this.running )
-      return;
+					lightNode.distance = 1 / light.linearAttenuation;
 
-    this.startTime = Date.now();
-    this.running = true;
-    THREE.GLTFLoader.Animations.add( this.uuid, this );
+				}
 
-  };
+				if ( light.quadraticAttenuation !== undefined ) {
 
-  GLTFAnimation.prototype.stop = function() {
+					lightNode.decay = light.quadraticAttenuation;
 
-    this.running = false;
-    THREE.GLTFLoader.Animations.remove( this.uuid );
+				}
 
-  };
+				if ( light.fallOffAngle !== undefined ) {
 
-  // Update - drive key frame evaluation
-  GLTFAnimation.prototype.update = function() {
+					lightNode.angle = light.fallOffAngle;
 
-    if ( !this.running )
-      return;
+				}
 
-    var now = Date.now();
-    var deltat = ( now - this.startTime ) / 1000;
-    var t = deltat % this.duration;
-    var nCycles = Math.floor( deltat / this.duration );
+				if ( light.fallOffExponent !== undefined ) {
 
-    if ( nCycles >= 1 && ! this.loop ) {
+					console.warn( 'THREE.GLTFLoader:: light.fallOffExponent not currently supported.' );
 
-      this.running = false;
-      _each( this.interps, function( _, i ) {
+				}
 
-        this.interps[ i ].interp( this.duration );
+				lightNode.name = light.name || ( 'light_' + lightId );
+				this.lights[ lightId ] = lightNode;
 
-      }.bind( this ));
-      this.stop();
-      return;
+			}
 
-    } else {
+		}
 
-      _each( this.interps, function( _, i ) {
+	}
 
-        this.interps[ i ].interp( t );
+	/* BINARY EXTENSION */
 
-      }.bind( this ));
+	var BINARY_EXTENSION_BUFFER_NAME = 'binary_glTF';
+	var BINARY_EXTENSION_HEADER_MAGIC = 'glTF';
+	var BINARY_EXTENSION_HEADER_LENGTH = 12;
+	var BINARY_EXTENSION_CHUNK_TYPES = { JSON: 0x4E4F534A, BIN: 0x004E4942 };
 
-    }
+	function GLTFBinaryExtension( data ) {
 
-  };
+		this.name = EXTENSIONS.KHR_BINARY_GLTF;
+		this.content = null;
+		this.body = null;
 
-  /* GLTFINTERPOLATOR */
+		var headerView = new DataView( data, 0, BINARY_EXTENSION_HEADER_LENGTH );
 
-  var GLTFInterpolator = function( param ) {
+		this.header = {
+			magic: THREE.LoaderUtils.decodeText( new Uint8Array( data.slice( 0, 4 ) ) ),
+			version: headerView.getUint32( 4, true ),
+			length: headerView.getUint32( 8, true )
+		};
 
-    this.keys = param.keys;
-    this.values = param.values;
-    this.count = param.count;
-    this.type = param.type;
-    this.path = param.path;
-    this.isRot = false;
+		if ( this.header.magic !== BINARY_EXTENSION_HEADER_MAGIC ) {
 
-    var node = param.target;
-    node.updateMatrix();
-    node.matrixAutoUpdate = true;
-    this.targetNode = node;
+			throw new Error( 'THREE.GLTFLoader: Unsupported glTF-Binary header.' );
 
-    switch ( param.path ) {
+		} else if ( this.header.version < 2.0 ) {
 
-      case "translation" :
+			throw new Error( 'THREE.GLTFLoader: Legacy binary file detected. Use LegacyGLTFLoader instead.' );
 
-        this.target = node.position;
-        this.originalValue = node.position.clone();
-        break;
+		}
 
-      case "rotation" :
+		var chunkView = new DataView( data, BINARY_EXTENSION_HEADER_LENGTH );
+		var chunkIndex = 0;
 
-        this.target = node.quaternion;
-        this.originalValue = node.quaternion.clone();
-        this.isRot = true;
-        break;
+		while ( chunkIndex < chunkView.byteLength ) {
 
-      case "scale" :
+			var chunkLength = chunkView.getUint32( chunkIndex, true );
+			chunkIndex += 4;
 
-        this.target = node.scale;
-        this.originalValue = node.scale.clone();
-        break;
+			var chunkType = chunkView.getUint32( chunkIndex, true );
+			chunkIndex += 4;
 
-    }
+			if ( chunkType === BINARY_EXTENSION_CHUNK_TYPES.JSON ) {
 
-    this.duration = this.keys[ this.count - 1 ];
+				var contentArray = new Uint8Array( data, BINARY_EXTENSION_HEADER_LENGTH + chunkIndex, chunkLength );
+				this.content = THREE.LoaderUtils.decodeText( contentArray );
 
-    this.vec1 = new THREE.Vector3();
-    this.vec2 = new THREE.Vector3();
-    this.vec3 = new THREE.Vector3();
-    this.quat1 = new THREE.Quaternion();
-    this.quat2 = new THREE.Quaternion();
-    this.quat3 = new THREE.Quaternion();
+			} else if ( chunkType === BINARY_EXTENSION_CHUNK_TYPES.BIN ) {
 
-  };
+				var byteOffset = BINARY_EXTENSION_HEADER_LENGTH + chunkIndex;
+				this.body = data.slice( byteOffset, byteOffset + chunkLength );
 
-  //Interpolation and tweening methods
-  GLTFInterpolator.prototype.interp = function( t ) {
+			}
 
-    if ( t == this.keys[ 0 ] ) {
+			// Clients must ignore chunks with unknown types.
 
-      if ( this.isRot ) {
+			chunkIndex += chunkLength;
 
-        this.quat3.fromArray( this.values );
+		}
 
-      } else {
+		if ( this.content === null ) {
 
-        this.vec3.fromArray( this.values );
+			throw new Error( 'THREE.GLTFLoader: JSON content not found.' );
 
-      }
+		}
 
-    } else if ( t < this.keys[ 0 ] ) {
+	}
 
-      if ( this.isRot ) {
+	/**
+	 * Specular-Glossiness Extension
+	 *
+	 * Specification: https://github.com/KhronosGroup/glTF/tree/master/extensions/2.0/Khronos/KHR_materials_pbrSpecularGlossiness
+	 */
+	function GLTFMaterialsPbrSpecularGlossinessExtension() {
 
-        this.quat1.copy( this.originalValue );
-        this.quat2.fromArray( this.values );
-        THREE.Quaternion.slerp( this.quat1, this.quat2, this.quat3, t / this.keys[ 0 ] );
+		return {
 
-      } else {
+			name: EXTENSIONS.KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS,
 
-        this.vec3.copy( this.originalValue );
-        this.vec2.fromArray( this.values );
-        this.vec3.lerp( this.vec2, t / this.keys[ 0 ] );
+			specularGlossinessParams: [
+				'color',
+				'map',
+				'lightMap',
+				'lightMapIntensity',
+				'aoMap',
+				'aoMapIntensity',
+				'emissive',
+				'emissiveIntensity',
+				'emissiveMap',
+				'bumpMap',
+				'bumpScale',
+				'normalMap',
+				'displacementMap',
+				'displacementScale',
+				'displacementBias',
+				'specularMap',
+				'specular',
+				'glossinessMap',
+				'glossiness',
+				'alphaMap',
+				'envMap',
+				'envMapIntensity',
+				'refractionRatio',
+			],
 
-      }
+			getMaterialType: function () {
 
-    } else if ( t >= this.keys[ this.count - 1 ] ) {
+				return THREE.ShaderMaterial;
 
-      if ( this.isRot ) {
+			},
 
-        this.quat3.fromArray( this.values, ( this.count - 1 ) * 4 );
+			extendParams: function ( params, material, parser ) {
 
-      } else {
+				var pbrSpecularGlossiness = material.extensions[ this.name ];
 
-        this.vec3.fromArray( this.values, ( this.count - 1 ) * 3 );
+				var shader = THREE.ShaderLib[ 'standard' ];
 
-      }
+				var uniforms = THREE.UniformsUtils.clone( shader.uniforms );
 
-    } else {
+				var specularMapParsFragmentChunk = [
+					'#ifdef USE_SPECULARMAP',
+					'	uniform sampler2D specularMap;',
+					'#endif'
+				].join( '\n' );
 
-      for ( var i = 0; i < this.count - 1; i ++ ) {
+				var glossinessMapParsFragmentChunk = [
+					'#ifdef USE_GLOSSINESSMAP',
+					'	uniform sampler2D glossinessMap;',
+					'#endif'
+				].join( '\n' );
 
-        var key1 = this.keys[ i ];
-        var key2 = this.keys[ i + 1 ];
+				var specularMapFragmentChunk = [
+					'vec3 specularFactor = specular;',
+					'#ifdef USE_SPECULARMAP',
+					'	vec4 texelSpecular = texture2D( specularMap, vUv );',
+					'	texelSpecular = sRGBToLinear( texelSpecular );',
+					'	// reads channel RGB, compatible with a glTF Specular-Glossiness (RGBA) texture',
+					'	specularFactor *= texelSpecular.rgb;',
+					'#endif'
+				].join( '\n' );
 
-        if ( t >= key1 && t <= key2 ) {
+				var glossinessMapFragmentChunk = [
+					'float glossinessFactor = glossiness;',
+					'#ifdef USE_GLOSSINESSMAP',
+					'	vec4 texelGlossiness = texture2D( glossinessMap, vUv );',
+					'	// reads channel A, compatible with a glTF Specular-Glossiness (RGBA) texture',
+					'	glossinessFactor *= texelGlossiness.a;',
+					'#endif'
+				].join( '\n' );
 
-          if ( this.isRot ) {
+				var lightPhysicalFragmentChunk = [
+					'PhysicalMaterial material;',
+					'material.diffuseColor = diffuseColor.rgb;',
+					'material.specularRoughness = clamp( 1.0 - glossinessFactor, 0.04, 1.0 );',
+					'material.specularColor = specularFactor.rgb;',
+				].join( '\n' );
 
-            this.quat1.fromArray( this.values, i * 4 );
-            this.quat2.fromArray( this.values, ( i + 1 ) * 4 );
-            THREE.Quaternion.slerp( this.quat1, this.quat2, this.quat3, ( t - key1 ) / ( key2 - key1 ) );
+				var fragmentShader = shader.fragmentShader
+					.replace( '#include <specularmap_fragment>', '' )
+					.replace( 'uniform float roughness;', 'uniform vec3 specular;' )
+					.replace( 'uniform float metalness;', 'uniform float glossiness;' )
+					.replace( '#include <roughnessmap_pars_fragment>', specularMapParsFragmentChunk )
+					.replace( '#include <metalnessmap_pars_fragment>', glossinessMapParsFragmentChunk )
+					.replace( '#include <roughnessmap_fragment>', specularMapFragmentChunk )
+					.replace( '#include <metalnessmap_fragment>', glossinessMapFragmentChunk )
+					.replace( '#include <lights_physical_fragment>', lightPhysicalFragmentChunk );
 
-          } else {
+				delete uniforms.roughness;
+				delete uniforms.metalness;
+				delete uniforms.roughnessMap;
+				delete uniforms.metalnessMap;
 
-            this.vec3.fromArray( this.values, i * 3 );
-            this.vec2.fromArray( this.values, ( i + 1 ) * 3 );
-            this.vec3.lerp( this.vec2, ( t - key1 ) / ( key2 - key1 ) );
+				uniforms.specular = { value: new THREE.Color().setHex( 0x111111 ) };
+				uniforms.glossiness = { value: 0.5 };
+				uniforms.specularMap = { value: null };
+				uniforms.glossinessMap = { value: null };
 
-          }
+				params.vertexShader = shader.vertexShader;
+				params.fragmentShader = fragmentShader;
+				params.uniforms = uniforms;
+				params.defines = { 'STANDARD': '' };
 
-        }
+				params.color = new THREE.Color( 1.0, 1.0, 1.0 );
+				params.opacity = 1.0;
 
-      }
+				var pending = [];
 
-    }
+				if ( Array.isArray( pbrSpecularGlossiness.diffuseFactor ) ) {
 
-    if ( this.target ) {
+					var array = pbrSpecularGlossiness.diffuseFactor;
 
-      if ( this.isRot ) {
+					params.color.fromArray( array );
+					params.opacity = array[ 3 ];
 
-        this.target.copy( this.quat3 );
+				}
 
-      } else {
+				if ( pbrSpecularGlossiness.diffuseTexture !== undefined ) {
 
-        this.target.copy( this.vec3 );
+					pending.push( parser.assignTexture( params, 'map', pbrSpecularGlossiness.diffuseTexture.index ) );
 
-      }
+				}
 
-    }
+				params.emissive = new THREE.Color( 0.0, 0.0, 0.0 );
+				params.glossiness = pbrSpecularGlossiness.glossinessFactor !== undefined ? pbrSpecularGlossiness.glossinessFactor : 1.0;
+				params.specular = new THREE.Color( 1.0, 1.0, 1.0 );
 
-  };
+				if ( Array.isArray( pbrSpecularGlossiness.specularFactor ) ) {
 
+					params.specular.fromArray( pbrSpecularGlossiness.specularFactor );
 
-  /*********************************/
-  /********** INTERNALS ************/
-  /*********************************/
+				}
 
-  /* CONSTANTS */
+				if ( pbrSpecularGlossiness.specularGlossinessTexture !== undefined ) {
 
-  var WEBGL_CONSTANTS = {
-    FLOAT: 5126,
-    //FLOAT_MAT2: 35674,
-    FLOAT_MAT3: 35675,
-    FLOAT_MAT4: 35676,
-    FLOAT_VEC2: 35664,
-    FLOAT_VEC3: 35665,
-    FLOAT_VEC4: 35666,
-    LINEAR: 9729,
-    REPEAT: 10497,
-    SAMPLER_2D: 35678,
-    TRIANGLES: 4,
-    UNSIGNED_BYTE: 5121,
-    UNSIGNED_SHORT: 5123,
+					var specGlossIndex = pbrSpecularGlossiness.specularGlossinessTexture.index;
+					pending.push( parser.assignTexture( params, 'glossinessMap', specGlossIndex ) );
+					pending.push( parser.assignTexture( params, 'specularMap', specGlossIndex ) );
 
-    VERTEX_SHADER: 35633,
-    FRAGMENT_SHADER: 35632
-  };
+				}
 
-  var WEBGL_TYPE = {
-    5126: Number,
-    //35674: THREE.Matrix2,
-    35675: THREE.Matrix3,
-    35676: THREE.Matrix4,
-    35664: THREE.Vector2,
-    35665: THREE.Vector3,
-    35666: THREE.Vector4,
-    35678: THREE.Texture
-  };
+				return Promise.all( pending );
 
-  var WEBGL_COMPONENT_TYPES = {
-    5120: Int8Array,
-    5121: Uint8Array,
-    5122: Int16Array,
-    5123: Uint16Array,
-    5125: Uint32Array,
-    5126: Float32Array
-  };
+			},
 
-  var WEBGL_FILTERS = {
-    9728: THREE.NearestFilter,
-    9729: THREE.LinearFilter,
-    9984: THREE.NearestMipMapNearestFilter,
-    9985: THREE.LinearMipMapNearestFilter,
-    9986: THREE.NearestMipMapLinearFilter,
-    9987: THREE.LinearMipMapLinearFilter
-  };
+			createMaterial: function ( params ) {
 
-  var WEBGL_WRAPPINGS = {
-    33071: THREE.ClampToEdgeWrapping,
-    33648: THREE.MirroredRepeatWrapping,
-    10497: THREE.RepeatWrapping
-  };
+				// setup material properties based on MeshStandardMaterial for Specular-Glossiness
 
-  var WEBGL_TYPE_SIZES = {
-    'SCALAR': 1,
-    'VEC2': 2,
-    'VEC3': 3,
-    'VEC4': 4,
-    'MAT2': 4,
-    'MAT3': 9,
-    'MAT4': 16
-  };
+				var material = new THREE.ShaderMaterial( {
+					defines: params.defines,
+					vertexShader: params.vertexShader,
+					fragmentShader: params.fragmentShader,
+					uniforms: params.uniforms,
+					fog: true,
+					lights: true,
+					opacity: params.opacity,
+					transparent: params.transparent
+				} );
 
-  /* UTILITY FUNCTIONS */
+				material.isGLTFSpecularGlossinessMaterial = true;
 
-  var _each = function( object, callback, thisObj ) {
+				material.color = params.color;
 
-    if ( !object ) {
-      return Promise.resolve();
-    }
+				material.map = params.map === undefined ? null : params.map;
 
-    var results;
-    var fns = [];
+				material.lightMap = null;
+				material.lightMapIntensity = 1.0;
 
-    if ( Object.prototype.toString.call( object ) === '[object Array]' ) {
+				material.aoMap = params.aoMap === undefined ? null : params.aoMap;
+				material.aoMapIntensity = 1.0;
 
-      results = [];
+				material.emissive = params.emissive;
+				material.emissiveIntensity = 1.0;
+				material.emissiveMap = params.emissiveMap === undefined ? null : params.emissiveMap;
 
-      var length = object.length;
-      for ( var idx = 0; idx < length; idx ++ ) {
-        var value = callback.call( thisObj || this, object[ idx ], idx );
-        if ( value ) {
-          fns.push( value );
-          if ( value instanceof Promise ) {
-            value.then( function( key, value ) {
-              results[ idx ] = value;
-            }.bind( this, key ));
-          } else {
-            results[ idx ] = value;
-          }
-        }
-      }
+				material.bumpMap = params.bumpMap === undefined ? null : params.bumpMap;
+				material.bumpScale = 1;
 
-    } else {
+				material.normalMap = params.normalMap === undefined ? null : params.normalMap;
+				if ( params.normalScale ) material.normalScale = params.normalScale;
 
-      results = {};
+				material.displacementMap = null;
+				material.displacementScale = 1;
+				material.displacementBias = 0;
 
-      for ( var key in object ) {
-        if ( object.hasOwnProperty( key ) ) {
-          var value = callback.call( thisObj || this, object[ key ], key );
-          if ( value ) {
-            fns.push( value );
-            if ( value instanceof Promise ) {
-              value.then( function( key, value ) {
-                results[ key ] = value;
-              }.bind( this, key ));
-            } else {
-              results[ key ] = value;
-            }
-          }
-        }
-      }
+				material.specularMap = params.specularMap === undefined ? null : params.specularMap;
+				material.specular = params.specular;
 
-    }
+				material.glossinessMap = params.glossinessMap === undefined ? null : params.glossinessMap;
+				material.glossiness = params.glossiness;
 
-    return Promise.all( fns ).then( function() {
-      return results;
-    });
+				material.alphaMap = null;
 
-  };
+				material.envMap = params.envMap === undefined ? null : params.envMap;
+				material.envMapIntensity = 1.0;
 
-  var resolveURL = function( url, path ) {
+				material.refractionRatio = 0.98;
 
-    // Invalid URL
-    if ( typeof url !== 'string' || url === '' )
-      return '';
+				material.extensions.derivatives = true;
 
-    // Absolute URL
-    if ( /^https?:\/\//i.test( url ) ) {
+				return material;
 
-      return url;
+			},
 
-    }
+			/**
+			 * Clones a GLTFSpecularGlossinessMaterial instance. The ShaderMaterial.copy() method can
+			 * copy only properties it knows about or inherits, and misses many properties that would
+			 * normally be defined by MeshStandardMaterial.
+			 *
+			 * This method allows GLTFSpecularGlossinessMaterials to be cloned in the process of
+			 * loading a glTF model, but cloning later (e.g. by the user) would require these changes
+			 * AND also updating `.onBeforeRender` on the parent mesh.
+			 *
+			 * @param  {THREE.ShaderMaterial} source
+			 * @return {THREE.ShaderMaterial}
+			 */
+			cloneMaterial: function ( source ) {
 
-    // Data URI
-    if ( /^data:.*,.*$/i.test( url ) ) {
+				var target = source.clone();
 
-      return url;
+				target.isGLTFSpecularGlossinessMaterial = true;
 
-    }
+				var params = this.specularGlossinessParams;
 
-    // Relative URL
-    return (path || '') + url;
+				for ( var i = 0, il = params.length; i < il; i ++ ) {
 
-  };
+					target[ params[ i ] ] = source[ params[ i ] ];
 
-  // Three.js seems too dependent on attribute names so globally
-  // replace those in the shader code
-  var replaceTHREEShaderAttributes = function( shaderText, technique ) {
+				}
 
-    // Expected technique attributes
-    var attributes = {};
+				return target;
 
-    _each( technique.attributes, function( pname, attributeId ) {
+			},
 
-      var param = technique.parameters[ pname ];
-      var atype = param.type;
-      var semantic = param.semantic;
+			// Here's based on refreshUniformsCommon() and refreshUniformsStandard() in WebGLRenderer.
+			refreshUniforms: function ( renderer, scene, camera, geometry, material, group ) {
 
-      attributes[ attributeId ] = {
-        type : atype,
-        semantic : semantic
-      };
+				if ( material.isGLTFSpecularGlossinessMaterial !== true ) {
 
-    });
+					return;
 
-    // Figure out which attributes to change in technique
+				}
 
-    var shaderParams = technique.parameters;
-    var shaderAttributes = technique.attributes;
-    var params = {};
+				var uniforms = material.uniforms;
+				var defines = material.defines;
 
-    _each( attributes, function( _, attributeId ) {
+				uniforms.opacity.value = material.opacity;
 
-      var pname = shaderAttributes[ attributeId ];
-      var shaderParam = shaderParams[ pname ];
-      var semantic = shaderParam.semantic;
-      if ( semantic ) {
+				uniforms.diffuse.value.copy( material.color );
+				uniforms.emissive.value.copy( material.emissive ).multiplyScalar( material.emissiveIntensity );
 
-        params[ attributeId ] = shaderParam;
+				uniforms.map.value = material.map;
+				uniforms.specularMap.value = material.specularMap;
+				uniforms.alphaMap.value = material.alphaMap;
 
-      }
+				uniforms.lightMap.value = material.lightMap;
+				uniforms.lightMapIntensity.value = material.lightMapIntensity;
 
-    });
+				uniforms.aoMap.value = material.aoMap;
+				uniforms.aoMapIntensity.value = material.aoMapIntensity;
 
-    _each( params, function( param, pname ) {
+				// uv repeat and offset setting priorities
+				// 1. color map
+				// 2. specular map
+				// 3. normal map
+				// 4. bump map
+				// 5. alpha map
+				// 6. emissive map
 
-      var semantic = param.semantic;
+				var uvScaleMap;
 
-      var regEx = eval( "/" + pname + "/g" );
+				if ( material.map ) {
 
-      switch ( semantic ) {
+					uvScaleMap = material.map;
 
-        case "POSITION":
+				} else if ( material.specularMap ) {
 
-          shaderText = shaderText.replace( regEx, 'position' );
-          break;
+					uvScaleMap = material.specularMap;
 
-        case "NORMAL":
+				} else if ( material.displacementMap ) {
 
-          shaderText = shaderText.replace( regEx, 'normal' );
-          break;
+					uvScaleMap = material.displacementMap;
 
-        case 'TEXCOORD_0':
-        case 'TEXCOORD0':
-        case 'TEXCOORD':
+				} else if ( material.normalMap ) {
 
-          shaderText = shaderText.replace( regEx, 'uv' );
-          break;
+					uvScaleMap = material.normalMap;
 
-        case "WEIGHT":
+				} else if ( material.bumpMap ) {
 
-          shaderText = shaderText.replace(regEx, 'skinWeight');
-          break;
+					uvScaleMap = material.bumpMap;
 
-        case "JOINT":
+				} else if ( material.glossinessMap ) {
 
-          shaderText = shaderText.replace(regEx, 'skinIndex');
-          break;
+					uvScaleMap = material.glossinessMap;
 
-      }
+				} else if ( material.alphaMap ) {
 
-    });
+					uvScaleMap = material.alphaMap;
 
-    return shaderText;
+				} else if ( material.emissiveMap ) {
 
-  };
+					uvScaleMap = material.emissiveMap;
 
-  // Deferred constructor for RawShaderMaterial types
-  var DeferredShaderMaterial = function( params ) {
+				}
 
-    this.isDeferredShaderMaterial = true;
+				if ( uvScaleMap !== undefined ) {
 
-    this.params = params;
+					// backwards compatibility
+					if ( uvScaleMap.isWebGLRenderTarget ) {
 
-  };
+						uvScaleMap = uvScaleMap.texture;
 
-  DeferredShaderMaterial.prototype.create = function() {
+					}
 
-    var uniforms = THREE.UniformsUtils.clone( this.params.uniforms );
+					var offset;
+					var repeat;
 
-    _each( this.params.uniforms, function( originalUniform, uniformId ) {
+					if ( uvScaleMap.matrix !== undefined ) {
 
-      if ( originalUniform.value instanceof THREE.Texture ) {
+						// > r88.
 
-        uniforms[ uniformId ].value = originalUniform.value;
-        uniforms[ uniformId ].value.needsUpdate = true;
+						if ( uvScaleMap.matrixAutoUpdate === true ) {
 
-      }
+							offset = uvScaleMap.offset;
+							repeat = uvScaleMap.repeat;
+							var rotation = uvScaleMap.rotation;
+							var center = uvScaleMap.center;
 
-      uniforms[ uniformId ].semantic = originalUniform.semantic;
-      uniforms[ uniformId ].node = originalUniform.node;
+							uvScaleMap.matrix.setUvTransform( offset.x, offset.y, repeat.x, repeat.y, rotation, center.x, center.y );
 
-    });
+						}
 
-    this.params.uniforms = uniforms;
+						uniforms.uvTransform.value.copy( uvScaleMap.matrix );
 
-    return new THREE.RawShaderMaterial( this.params );
+					} else {
 
-  };
+						// <= r87. Remove when reasonable.
 
-  /* GLTF PARSER */
+						offset = uvScaleMap.offset;
+						repeat = uvScaleMap.repeat;
 
-  var GLTFParser = function(json, options) {
+						uniforms.offsetRepeat.value.set( offset.x, offset.y, repeat.x, repeat.y );
 
-    this.json = json || {};
-    this.options = options || {};
+					}
 
-    // loader object cache
-    this.cache = new GLTFRegistry();
+				}
 
-  };
+				uniforms.envMap.value = material.envMap;
+				uniforms.envMapIntensity.value = material.envMapIntensity;
+				uniforms.flipEnvMap.value = ( material.envMap && material.envMap.isCubeTexture ) ? - 1 : 1;
 
-  GLTFParser.prototype._withDependencies = function( dependencies ) {
+				uniforms.refractionRatio.value = material.refractionRatio;
 
-    var _dependencies = {};
+				uniforms.specular.value.copy( material.specular );
+				uniforms.glossiness.value = material.glossiness;
 
-    for ( var i = 0; i < dependencies.length; i ++ ) {
+				uniforms.glossinessMap.value = material.glossinessMap;
 
-      var dependency = dependencies[ i ];
-      var fnName = "load" + dependency.charAt(0).toUpperCase() + dependency.slice(1);
+				uniforms.emissiveMap.value = material.emissiveMap;
+				uniforms.bumpMap.value = material.bumpMap;
+				uniforms.normalMap.value = material.normalMap;
 
-      var cached = this.cache.get( dependency );
+				uniforms.displacementMap.value = material.displacementMap;
+				uniforms.displacementScale.value = material.displacementScale;
+				uniforms.displacementBias.value = material.displacementBias;
 
-      if ( cached !== undefined ) {
+				if ( uniforms.glossinessMap.value !== null && defines.USE_GLOSSINESSMAP === undefined ) {
 
-        _dependencies[ dependency ] = cached;
+					defines.USE_GLOSSINESSMAP = '';
+					// set USE_ROUGHNESSMAP to enable vUv
+					defines.USE_ROUGHNESSMAP = '';
 
-      } else if ( this[ fnName ] ) {
+				}
 
-        var fn = this[ fnName ]();
-        this.cache.add( dependency, fn );
+				if ( uniforms.glossinessMap.value === null && defines.USE_GLOSSINESSMAP !== undefined ) {
 
-        _dependencies[ dependency ] = fn;
+					delete defines.USE_GLOSSINESSMAP;
+					delete defines.USE_ROUGHNESSMAP;
 
-      }
+				}
 
-    }
+			}
 
-    return _each( _dependencies, function( dependency, dependencyId ) {
+		};
 
-      return dependency;
+	}
 
-    });
+	/*********************************/
+	/********** INTERPOLATION ********/
+	/*********************************/
 
-  };
+	// Spline Interpolation
+	// Specification: https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#appendix-c-spline-interpolation
+	function GLTFCubicSplineInterpolant( parameterPositions, sampleValues, sampleSize, resultBuffer ) {
 
-  GLTFParser.prototype.parse = function( callback ) {
+		THREE.Interpolant.call( this, parameterPositions, sampleValues, sampleSize, resultBuffer );
 
-    // Clear the loader cache
-    this.cache.removeAll();
+	};
 
-    // Fire the callback on complete
-    this._withDependencies([
-      "scenes",
-      "cameras",
-      "animations"
-    ]).then(function( dependencies ) {
+	GLTFCubicSplineInterpolant.prototype = Object.create( THREE.Interpolant.prototype );
+	GLTFCubicSplineInterpolant.prototype.constructor = GLTFCubicSplineInterpolant;
 
-      var scene = dependencies.scenes[ this.json.scene ];
+	GLTFCubicSplineInterpolant.prototype.interpolate_ = function ( i1, t0, t, t1 ) {
 
-      var cameras = [];
-      _each( dependencies.cameras, function( camera ) {
+		var result = this.resultBuffer;
+		var values = this.sampleValues;
+		var stride = this.valueSize;
 
-        cameras.push( camera );
+		var stride2 = stride * 2;
+		var stride3 = stride * 3;
 
-      });
+		var td = t1 - t0;
 
-      var animations = [];
-      _each( dependencies.animations, function( animation ) {
+		var p = ( t - t0 ) / td;
+		var pp = p * p;
+		var ppp = pp * p;
 
-        animations.push( animation );
+		var offset1 = i1 * stride3;
+		var offset0 = offset1 - stride3;
 
-      });
+		var s0 = 2 * ppp - 3 * pp + 1;
+		var s1 = ppp - 2 * pp + p;
+		var s2 = - 2 * ppp + 3 * pp;
+		var s3 = ppp - pp;
 
-      callback( scene, cameras, animations );
+		// Layout of keyframe output values for CUBICSPLINE animations:
+		//   [ inTangent_1, splineVertex_1, outTangent_1, inTangent_2, splineVertex_2, ... ]
+		for ( var i = 0; i !== stride; i ++ ) {
 
-    }.bind( this ));
+			var p0 = values[ offset0 + i + stride ];        // splineVertex_k
+			var m0 = values[ offset0 + i + stride2 ] * td;  // outTangent_k * (t_k+1 - t_k)
+			var p1 = values[ offset1 + i + stride ];        // splineVertex_k+1
+			var m1 = values[ offset1 + i ] * td;            // inTangent_k+1 * (t_k+1 - t_k)
 
-  };
+			result[ i ] = s0 * p0 + s1 * m0 + s2 * p1 + s3 * m1;
 
-  GLTFParser.prototype.loadShaders = function() {
+		}
 
-    return _each( this.json.shaders, function( shader, shaderId ) {
+		return result;
 
-      return new Promise( function( resolve ) {
+	};
 
-        var loader = new THREE.XHRLoader();
-        loader.responseType = 'text';
-        loader.load( resolveURL( shader.uri, this.options.path ), function( shaderText ) {
+	/*********************************/
+	/********** INTERNALS ************/
+	/*********************************/
 
-          resolve( shaderText );
+	/* CONSTANTS */
 
-        });
+	var WEBGL_CONSTANTS = {
+		FLOAT: 5126,
+		//FLOAT_MAT2: 35674,
+		FLOAT_MAT3: 35675,
+		FLOAT_MAT4: 35676,
+		FLOAT_VEC2: 35664,
+		FLOAT_VEC3: 35665,
+		FLOAT_VEC4: 35666,
+		LINEAR: 9729,
+		REPEAT: 10497,
+		SAMPLER_2D: 35678,
+		POINTS: 0,
+		LINES: 1,
+		LINE_LOOP: 2,
+		LINE_STRIP: 3,
+		TRIANGLES: 4,
+		TRIANGLE_STRIP: 5,
+		TRIANGLE_FAN: 6,
+		UNSIGNED_BYTE: 5121,
+		UNSIGNED_SHORT: 5123
+	};
 
-      }.bind( this ));
+	var WEBGL_TYPE = {
+		5126: Number,
+		//35674: THREE.Matrix2,
+		35675: THREE.Matrix3,
+		35676: THREE.Matrix4,
+		35664: THREE.Vector2,
+		35665: THREE.Vector3,
+		35666: THREE.Vector4,
+		35678: THREE.Texture
+	};
 
-    }.bind( this ));
+	var WEBGL_COMPONENT_TYPES = {
+		5120: Int8Array,
+		5121: Uint8Array,
+		5122: Int16Array,
+		5123: Uint16Array,
+		5125: Uint32Array,
+		5126: Float32Array
+	};
 
-  };
+	var WEBGL_FILTERS = {
+		9728: THREE.NearestFilter,
+		9729: THREE.LinearFilter,
+		9984: THREE.NearestMipMapNearestFilter,
+		9985: THREE.LinearMipMapNearestFilter,
+		9986: THREE.NearestMipMapLinearFilter,
+		9987: THREE.LinearMipMapLinearFilter
+	};
 
-  GLTFParser.prototype.loadBuffers = function() {
+	var WEBGL_WRAPPINGS = {
+		33071: THREE.ClampToEdgeWrapping,
+		33648: THREE.MirroredRepeatWrapping,
+		10497: THREE.RepeatWrapping
+	};
 
-    return _each( this.json.buffers, function( buffer, bufferId ) {
+	var WEBGL_TEXTURE_FORMATS = {
+		6406: THREE.AlphaFormat,
+		6407: THREE.RGBFormat,
+		6408: THREE.RGBAFormat,
+		6409: THREE.LuminanceFormat,
+		6410: THREE.LuminanceAlphaFormat
+	};
 
-      if ( buffer.type === 'arraybuffer' ) {
+	var WEBGL_TEXTURE_DATATYPES = {
+		5121: THREE.UnsignedByteType,
+		32819: THREE.UnsignedShort4444Type,
+		32820: THREE.UnsignedShort5551Type,
+		33635: THREE.UnsignedShort565Type
+	};
 
-        return new Promise( function( resolve ) {
+	var WEBGL_SIDES = {
+		1028: THREE.BackSide, // Culling front
+		1029: THREE.FrontSide // Culling back
+		//1032: THREE.NoSide   // Culling front and back, what to do?
+	};
 
-          var loader = new THREE.XHRLoader();
-          loader.responseType = 'arraybuffer';
-          loader.load( resolveURL( buffer.uri, this.options.path ), function( buffer ) {
+	var WEBGL_DEPTH_FUNCS = {
+		512: THREE.NeverDepth,
+		513: THREE.LessDepth,
+		514: THREE.EqualDepth,
+		515: THREE.LessEqualDepth,
+		516: THREE.GreaterEqualDepth,
+		517: THREE.NotEqualDepth,
+		518: THREE.GreaterEqualDepth,
+		519: THREE.AlwaysDepth
+	};
 
-            resolve( buffer );
+	var WEBGL_BLEND_EQUATIONS = {
+		32774: THREE.AddEquation,
+		32778: THREE.SubtractEquation,
+		32779: THREE.ReverseSubtractEquation
+	};
 
-          } );
+	var WEBGL_BLEND_FUNCS = {
+		0: THREE.ZeroFactor,
+		1: THREE.OneFactor,
+		768: THREE.SrcColorFactor,
+		769: THREE.OneMinusSrcColorFactor,
+		770: THREE.SrcAlphaFactor,
+		771: THREE.OneMinusSrcAlphaFactor,
+		772: THREE.DstAlphaFactor,
+		773: THREE.OneMinusDstAlphaFactor,
+		774: THREE.DstColorFactor,
+		775: THREE.OneMinusDstColorFactor,
+		776: THREE.SrcAlphaSaturateFactor
+		// The followings are not supported by Three.js yet
+		//32769: CONSTANT_COLOR,
+		//32770: ONE_MINUS_CONSTANT_COLOR,
+		//32771: CONSTANT_ALPHA,
+		//32772: ONE_MINUS_CONSTANT_COLOR
+	};
 
-        }.bind( this ));
+	var WEBGL_TYPE_SIZES = {
+		'SCALAR': 1,
+		'VEC2': 2,
+		'VEC3': 3,
+		'VEC4': 4,
+		'MAT2': 4,
+		'MAT3': 9,
+		'MAT4': 16
+	};
 
-      }
+	var PATH_PROPERTIES = {
+		scale: 'scale',
+		translation: 'position',
+		rotation: 'quaternion',
+		weights: 'morphTargetInfluences'
+	};
 
-    }.bind( this ));
+	var INTERPOLATION = {
+		CUBICSPLINE: THREE.InterpolateSmooth, // We use custom interpolation GLTFCubicSplineInterpolation for CUBICSPLINE.
+		                                      // KeyframeTrack.optimize() can't handle glTF Cubic Spline output values layout,
+		                                      // using THREE.InterpolateSmooth for KeyframeTrack instantiation to prevent optimization.
+		                                      // See KeyframeTrack.optimize() for the detail.
+		LINEAR: THREE.InterpolateLinear,
+		STEP: THREE.InterpolateDiscrete
+	};
 
-  };
+	var STATES_ENABLES = {
+		2884: 'CULL_FACE',
+		2929: 'DEPTH_TEST',
+		3042: 'BLEND',
+		3089: 'SCISSOR_TEST',
+		32823: 'POLYGON_OFFSET_FILL',
+		32926: 'SAMPLE_ALPHA_TO_COVERAGE'
+	};
 
-  GLTFParser.prototype.loadBufferViews = function() {
+	var ALPHA_MODES = {
+		OPAQUE: 'OPAQUE',
+		MASK: 'MASK',
+		BLEND: 'BLEND'
+	};
 
-    return this._withDependencies([
-      "buffers"
-    ]).then( function( dependencies ) {
+	/* UTILITY FUNCTIONS */
 
-      return _each( this.json.bufferViews, function( bufferView, bufferViewId ) {
+	function resolveURL( url, path ) {
 
-        var arraybuffer = dependencies.buffers[ bufferView.buffer ];
+		// Invalid URL
+		if ( typeof url !== 'string' || url === '' ) return '';
 
-        if(arraybuffer){
-          return arraybuffer.slice( bufferView.byteOffset, bufferView.byteOffset + bufferView.byteLength);
-        } else{
-          return null
-        }
+		// Absolute URL http://,https://,//
+		if ( /^(https?:)?\/\//i.test( url ) ) return url;
 
+		// Data URI
+		if ( /^data:.*,.*$/i.test( url ) ) return url;
 
-      });
+		// Blob URL
+		if ( /^blob:.*$/i.test( url ) ) return url;
 
-    }.bind( this ));
+		// Relative URL
+		return path + url;
 
-  };
+	}
 
-  GLTFParser.prototype.loadAccessors = function() {
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#default-material
+	 */
+	function createDefaultMaterial() {
 
-    return this._withDependencies([
-      "bufferViews"
-    ]).then( function( dependencies ) {
+		return new THREE.MeshStandardMaterial( {
+			color: 0xFFFFFF,
+			emissive: 0x000000,
+			metalness: 1,
+			roughness: 1,
+			transparent: false,
+			depthTest: true,
+			side: THREE.FrontSide
+		} );
 
-      return _each( this.json.accessors, function( accessor, accessorId ) {
+	}
 
-        var arraybuffer = dependencies.bufferViews[ accessor.bufferView ];
-        var itemSize = WEBGL_TYPE_SIZES[ accessor.type ];
-        var TypedArray = WEBGL_COMPONENT_TYPES[ accessor.componentType ];
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#morph-targets
+	 *
+	 * TODO: Implement support for morph targets on TANGENT attribute.
+	 *
+	 * @param {THREE.Mesh} mesh
+	 * @param {GLTF.Mesh} meshDef
+	 * @param {GLTF.Primitive} primitiveDef
+	 * @param {Array<THREE.BufferAttribute>} accessors
+	 */
+	function addMorphTargets( mesh, meshDef, primitiveDef, accessors ) {
 
-        var array = new TypedArray( arraybuffer, accessor.byteOffset, accessor.count * itemSize );
+		var geometry = mesh.geometry;
+		var material = mesh.material;
 
-        return new THREE.BufferAttribute( array, itemSize );
+		var targets = primitiveDef.targets;
+		var morphAttributes = geometry.morphAttributes;
 
-      });
+		morphAttributes.position = [];
+		morphAttributes.normal = [];
 
-    }.bind( this ));
+		material.morphTargets = true;
 
-  };
+		for ( var i = 0, il = targets.length; i < il; i ++ ) {
 
-  GLTFParser.prototype.loadTextures = function() {
+			var target = targets[ i ];
+			var attributeName = 'morphTarget' + i;
 
-    return _each( this.json.textures, function( texture, textureId ) {
+			var positionAttribute, normalAttribute;
 
-      if ( texture.source ) {
+			if ( target.POSITION !== undefined ) {
 
-        return new Promise( function( resolve ) {
+				// Three.js morph formula is
+				//   position
+				//     + weight0 * ( morphTarget0 - position )
+				//     + weight1 * ( morphTarget1 - position )
+				//     ...
+				// while the glTF one is
+				//   position
+				//     + weight0 * morphTarget0
+				//     + weight1 * morphTarget1
+				//     ...
+				// then adding position to morphTarget.
+				// So morphTarget value will depend on mesh's position, then cloning attribute
+				// for the case if attribute is shared among two or more meshes.
 
-          var source = this.json.images[ texture.source ];
+				positionAttribute = cloneBufferAttribute( accessors[ target.POSITION ] );
+				var position = geometry.attributes.position;
 
-          var textureLoader = THREE.Loader.Handlers.get( source.uri );
-          if ( textureLoader === null ) {
+				for ( var j = 0, jl = positionAttribute.count; j < jl; j ++ ) {
 
-            textureLoader = new THREE.TextureLoader();
+					positionAttribute.setXYZ(
+						j,
+						positionAttribute.getX( j ) + position.getX( j ),
+						positionAttribute.getY( j ) + position.getY( j ),
+						positionAttribute.getZ( j ) + position.getZ( j )
+					);
 
-          }
-          textureLoader.crossOrigin = this.options.crossOrigin || false;
+				}
 
-          textureLoader.load( resolveURL( source.uri, this.options.path ), function( _texture ) {
+			} else if ( geometry.attributes.position ) {
 
-            _texture.flipY = false;
+				// Copying the original position not to affect the final position.
+				// See the formula above.
+				positionAttribute = cloneBufferAttribute( geometry.attributes.position );
 
-            if ( texture.sampler ) {
+			}
 
-              var sampler = this.json.samplers[ texture.sampler ];
+			if ( positionAttribute !== undefined ) {
 
-              _texture.magFilter = WEBGL_FILTERS[ sampler.magFilter ];
-              _texture.minFilter = WEBGL_FILTERS[ sampler.minFilter ];
-              _texture.wrapS = WEBGL_WRAPPINGS[ sampler.wrapS ];
-              _texture.wrapT = WEBGL_WRAPPINGS[ sampler.wrapT ];
+				positionAttribute.name = attributeName;
+				morphAttributes.position.push( positionAttribute );
 
-            }
+			}
 
-            resolve( _texture );
+			if ( target.NORMAL !== undefined ) {
 
-          }.bind( this ));
+				material.morphNormals = true;
 
-        }.bind( this ));
+				// see target.POSITION's comment
 
-      }
+				normalAttribute = cloneBufferAttribute( accessors[ target.NORMAL ] );
+				var normal = geometry.attributes.normal;
 
-    }.bind( this ));
+				for ( var j = 0, jl = normalAttribute.count; j < jl; j ++ ) {
 
-  };
+					normalAttribute.setXYZ(
+						j,
+						normalAttribute.getX( j ) + normal.getX( j ),
+						normalAttribute.getY( j ) + normal.getY( j ),
+						normalAttribute.getZ( j ) + normal.getZ( j )
+					);
 
-  GLTFParser.prototype.loadMaterials = function() {
+				}
 
-    return this._withDependencies([
-      "shaders",
-      "textures"
-    ]).then( function( dependencies ) {
+			} else if ( geometry.attributes.normal !== undefined ) {
 
-      return _each( this.json.materials, function( material, materialId ) {
+				normalAttribute = cloneBufferAttribute( geometry.attributes.normal );
 
-        var materialType;
-        var materialValues = {};
-        var materialParams = {};
+			}
 
-        var khr_material;
+			if ( normalAttribute !== undefined ) {
 
-        if ( material.extensions && material.extensions.KHR_materials_common ) {
+				normalAttribute.name = attributeName;
+				morphAttributes.normal.push( normalAttribute );
 
-          khr_material = material.extensions.KHR_materials_common;
+			}
 
-        } else if ( this.json.extensions && this.json.extensions.KHR_materials_common ) {
+		}
 
-          khr_material = this.json.extensions.KHR_materials_common;
+		mesh.updateMorphTargets();
 
-        }
+		if ( meshDef.weights !== undefined ) {
 
-        if ( khr_material ) {
+			for ( var i = 0, il = meshDef.weights.length; i < il; i ++ ) {
 
-          switch ( khr_material.technique )
-          {
-            case 'BLINN' :
-            case 'PHONG' :
-              materialType = THREE.MeshPhongMaterial;
-              break;
+				mesh.morphTargetInfluences[ i ] = meshDef.weights[ i ];
 
-            case 'LAMBERT' :
-              materialType = THREE.MeshLambertMaterial;
-              break;
+			}
 
-            case 'CONSTANT' :
-            default :
-              materialType = THREE.MeshBasicMaterial;
-              break;
-          }
+		}
 
-          _each( khr_material.values, function( value, prop ) {
+	}
 
-            materialValues[ prop ] = value;
+	function isPrimitiveEqual( a, b ) {
 
-          });
+		if ( a.indices !== b.indices ) {
 
-          if ( khr_material.doubleSided || materialValues.doubleSided ) {
+			return false;
 
-            materialParams.side = THREE.DoubleSide;
+		}
 
-          }
+		var attribA = a.attributes || {};
+		var attribB = b.attributes || {};
+		var keysA = Object.keys( attribA );
+		var keysB = Object.keys( attribB );
 
-          if ( khr_material.transparent || materialValues.transparent ) {
+		if ( keysA.length !== keysB.length ) {
 
-            materialParams.transparent = true;
-            materialParams.opacity = ( materialValues.transparency !== undefined ) ? materialValues.transparency : 1;
+			return false;
 
-          }
+		}
 
-        } else if ( material.technique === undefined ) {
+		for ( var i = 0, il = keysA.length; i < il; i ++ ) {
 
-          materialType = THREE.MeshPhongMaterial;
+			var key = keysA[ i ];
 
-          _each( material.values, function( value, prop ) {
+			if ( attribA[ key ] !== attribB[ key ] ) {
 
-            materialValues[ prop ] = value;
+				return false;
 
-          });
+			}
 
-        } else {
+		}
 
-          materialType = DeferredShaderMaterial;
+		return true;
 
-          var technique = this.json.techniques[ material.technique ];
+	}
 
-          materialParams.uniforms = {};
+	function getCachedGeometry( cache, newPrimitive ) {
 
-          var program = this.json.programs[ technique.program ];
+		for ( var i = 0, il = cache.length; i < il; i ++ ) {
 
-          if ( program ) {
+			var cached = cache[ i ];
 
-            materialParams.fragmentShader = dependencies.shaders[ program.fragmentShader ];
+			if ( isPrimitiveEqual( cached.primitive, newPrimitive ) ) {
 
-            if ( ! materialParams.fragmentShader ) {
+				return cached.geometry;
 
-              console.warn( "ERROR: Missing fragment shader definition:", program.fragmentShader );
-              materialType = THREE.MeshPhongMaterial;
+			}
 
-            }
+		}
 
-            var vertexShader = dependencies.shaders[ program.vertexShader ];
+		return null;
 
-            if ( ! vertexShader ) {
+	}
 
-              console.warn( "ERROR: Missing vertex shader definition:", program.vertexShader );
-              materialType = THREE.MeshPhongMaterial;
+	function cloneBufferAttribute( attribute ) {
 
-            }
+		if ( attribute.isInterleavedBufferAttribute ) {
 
-            // IMPORTANT: FIX VERTEX SHADER ATTRIBUTE DEFINITIONS
-            materialParams.vertexShader = replaceTHREEShaderAttributes( vertexShader, technique );
+			var count = attribute.count;
+			var itemSize = attribute.itemSize;
+			var array = attribute.array.slice( 0, count * itemSize );
 
-            var uniforms = technique.uniforms;
+			for ( var i = 0; i < count; ++ i ) {
 
-            _each( uniforms, function( pname, uniformId ) {
+				array[ i ] = attribute.getX( i );
+				if ( itemSize >= 2 ) array[ i + 1 ] = attribute.getY( i );
+				if ( itemSize >= 3 ) array[ i + 2 ] = attribute.getZ( i );
+				if ( itemSize >= 4 ) array[ i + 3 ] = attribute.getW( i );
 
-              var shaderParam = technique.parameters[ pname ];
+			}
 
-              var ptype = shaderParam.type;
+			return new THREE.BufferAttribute( array, itemSize, attribute.normalized );
 
-              if ( WEBGL_TYPE[ ptype ] ) {
+		}
 
-                var pcount = shaderParam.count;
-                var value = material.values[ pname ];
+		return attribute.clone();
 
-                var uvalue = new WEBGL_TYPE[ ptype ]();
-                var usemantic = shaderParam.semantic;
-                var unode = shaderParam.node;
+	}
 
-                switch ( ptype ) {
+	/* GLTF PARSER */
 
-                  case WEBGL_CONSTANTS.FLOAT:
+	function GLTFParser( json, extensions, options ) {
 
-                    uvalue = shaderParam.value;
+		this.json = json || {};
+		this.extensions = extensions || {};
+		this.options = options || {};
 
-                    if ( pname == "transparency" ) {
+		// loader object cache
+		this.cache = new GLTFRegistry();
 
-                      materialParams.transparent = true;
+		// BufferGeometry caching
+		this.primitiveCache = [];
 
-                    }
+		this.textureLoader = new THREE.TextureLoader( this.options.manager );
+		this.textureLoader.setCrossOrigin( this.options.crossOrigin );
 
-                    if ( value ) {
+		this.fileLoader = new THREE.FileLoader( this.options.manager );
+		this.fileLoader.setResponseType( 'arraybuffer' );
 
-                      uvalue = value;
+	}
 
-                    }
+	GLTFParser.prototype.parse = function ( onLoad, onError ) {
 
-                    break;
+		var json = this.json;
 
-                  case WEBGL_CONSTANTS.FLOAT_VEC2:
-                  case WEBGL_CONSTANTS.FLOAT_VEC3:
-                  case WEBGL_CONSTANTS.FLOAT_VEC4:
-                  case WEBGL_CONSTANTS.FLOAT_MAT3:
+		// Clear the loader cache
+		this.cache.removeAll();
 
-                    if ( shaderParam && shaderParam.value ) {
+		// Mark the special nodes/meshes in json for efficient parse
+		this.markDefs();
 
-                      uvalue.fromArray( shaderParam.value );
+		// Fire the callback on complete
+		this.getMultiDependencies( [
 
-                    }
+			'scene',
+			'animation',
+			'camera'
 
-                    if ( value ) {
+		] ).then( function ( dependencies ) {
 
-                      uvalue.fromArray( value );
+			var scenes = dependencies.scenes || [];
+			var scene = scenes[ json.scene || 0 ];
+			var animations = dependencies.animations || [];
+			var asset = json.asset;
+			var cameras = dependencies.cameras || [];
 
-                    }
+			onLoad( scene, scenes, cameras, animations, asset );
 
-                    break;
+		} ).catch( onError );
 
-                  case WEBGL_CONSTANTS.FLOAT_MAT2:
+	};
 
-                    // what to do?
-                    console.warn("FLOAT_MAT2 is not a supported uniform type");
-                    break;
+	/**
+	 * Marks the special nodes/meshes in json for efficient parse.
+	 */
+	GLTFParser.prototype.markDefs = function () {
 
-                  case WEBGL_CONSTANTS.FLOAT_MAT4:
+		var nodeDefs = this.json.nodes || [];
+		var skinDefs = this.json.skins || [];
+		var meshDefs = this.json.meshes || [];
 
-                    if ( pcount ) {
+		var meshReferences = {};
+		var meshUses = {};
 
-                      uvalue = new Array( pcount );
+		// Nothing in the node definition indicates whether it is a Bone or an
+		// Object3D. Use the skins' joint references to mark bones.
+		for ( var skinIndex = 0, skinLength = skinDefs.length; skinIndex < skinLength; skinIndex ++ ) {
 
-                      for ( var mi = 0; mi < pcount; mi ++ ) {
+			var joints = skinDefs[ skinIndex ].joints;
 
-                        uvalue[ mi ] = new WEBGL_TYPE[ ptype ]();
+			for ( var i = 0, il = joints.length; i < il; i ++ ) {
 
-                      }
+				nodeDefs[ joints[ i ] ].isBone = true;
 
-                      if ( shaderParam && shaderParam.value ) {
+			}
 
-                        var m4v = shaderParam.value;
-                        uvalue.fromArray( m4v );
+		}
 
-                      }
+		// Meshes can (and should) be reused by multiple nodes in a glTF asset. To
+		// avoid having more than one THREE.Mesh with the same name, count
+		// references and rename instances below.
+		//
+		// Example: CesiumMilkTruck sample model reuses "Wheel" meshes.
+		for ( var nodeIndex = 0, nodeLength = nodeDefs.length; nodeIndex < nodeLength; nodeIndex ++ ) {
 
-                      if ( value ) {
+			var nodeDef = nodeDefs[ nodeIndex ];
 
-                        uvalue.fromArray( value );
+			if ( nodeDef.mesh !== undefined ) {
 
-                      }
+				if ( meshReferences[ nodeDef.mesh ] === undefined ) {
 
-                    }	else {
+					meshReferences[ nodeDef.mesh ] = meshUses[ nodeDef.mesh ] = 0;
 
-                      if ( shaderParam && shaderParam.value ) {
+				}
 
-                        var m4 = shaderParam.value;
-                        uvalue.fromArray( m4 );
+				meshReferences[ nodeDef.mesh ] ++;
 
-                      }
+				// Nothing in the mesh definition indicates whether it is
+				// a SkinnedMesh or Mesh. Use the node's mesh reference
+				// to mark SkinnedMesh if node has skin.
+				if ( nodeDef.skin !== undefined ) {
 
-                      if ( value ) {
+					meshDefs[ nodeDef.mesh ].isSkinnedMesh = true;
 
-                        uvalue.fromArray( value );
+				}
 
-                      }
+			}
 
-                    }
+		}
 
-                    break;
+		this.json.meshReferences = meshReferences;
+		this.json.meshUses = meshUses;
 
-                  case WEBGL_CONSTANTS.SAMPLER_2D:
+	};
 
-                    uvalue = value ? dependencies.textures[ value ] : null;
+	/**
+	 * Requests the specified dependency asynchronously, with caching.
+	 * @param {string} type
+	 * @param {number} index
+	 * @return {Promise<Object>}
+	 */
+	GLTFParser.prototype.getDependency = function ( type, index ) {
 
-                    break;
+		var cacheKey = type + ':' + index;
+		var dependency = this.cache.get( cacheKey );
 
-                }
+		if ( ! dependency ) {
 
-                materialParams.uniforms[ uniformId ] = {
-                  value: uvalue,
-                  semantic: usemantic,
-                  node: unode
-                };
+			var fnName = 'load' + type.charAt( 0 ).toUpperCase() + type.slice( 1 );
+			dependency = this[ fnName ]( index );
+			this.cache.add( cacheKey, dependency );
 
-              } else {
+		}
 
-                throw new Error( "Unknown shader uniform param type: " + ptype );
+		return dependency;
 
-              }
+	};
 
-            });
+	/**
+	 * Requests all dependencies of the specified type asynchronously, with caching.
+	 * @param {string} type
+	 * @return {Promise<Array<Object>>}
+	 */
+	GLTFParser.prototype.getDependencies = function ( type ) {
 
-          }
+		var dependencies = this.cache.get( type );
 
-        }
+		if ( ! dependencies ) {
 
-        if ( Array.isArray( materialValues.diffuse ) ) {
+			var parser = this;
+			var defs = this.json[ type + ( type === 'mesh' ? 'es' : 's' ) ] || [];
 
-          materialParams.color = new THREE.Color().fromArray( materialValues.diffuse );
+			dependencies = Promise.all( defs.map( function ( def, index ) {
 
-        } else if ( typeof( materialValues.diffuse ) === 'string' ) {
+				return parser.getDependency( type, index );
 
-          materialParams.map = dependencies.textures[ materialValues.diffuse ];
+			} ) );
 
-        }
+			this.cache.add( type, dependencies );
 
-        delete materialParams.diffuse;
+		}
 
-        if ( typeof( materialValues.reflective ) === 'string' ) {
+		return dependencies;
 
-          materialParams.envMap = dependencies.textures[ materialValues.reflective ];
+	};
 
-        }
+	/**
+	 * Requests all multiple dependencies of the specified types asynchronously, with caching.
+	 * @param {Array<string>} types
+	 * @return {Promise<Object<Array<Object>>>}
+	 */
+	GLTFParser.prototype.getMultiDependencies = function ( types ) {
 
-        if ( typeof( materialValues.bump ) === 'string' ) {
+		var results = {};
+		var pendings = [];
 
-          materialParams.bumpMap = dependencies.textures[ materialValues.bump ];
+		for ( var i = 0, il = types.length; i < il; i ++ ) {
 
-        }
+			var type = types[ i ];
+			var value = this.getDependencies( type );
 
-        if ( Array.isArray( materialValues.emission ) ) {
+			value = value.then( function ( key, value ) {
 
-          materialParams.emissive = new THREE.Color().fromArray( materialValues.emission );
+				results[ key ] = value;
 
-        }
+			}.bind( this, type + ( type === 'mesh' ? 'es' : 's' ) ) );
 
-        if ( Array.isArray( materialValues.specular ) ) {
+			pendings.push( value );
 
-          materialParams.specular = new THREE.Color().fromArray( materialValues.specular );
+		}
 
-        }
+		return Promise.all( pendings ).then( function () {
 
-        if ( materialValues.shininess !== undefined ) {
+			return results;
 
-          materialParams.shininess = materialValues.shininess;
+		} );
 
-        }
+	};
 
-        var _material = new materialType( materialParams );
-        _material.name = material.name;
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#buffers-and-buffer-views
+	 * @param {number} bufferIndex
+	 * @return {Promise<ArrayBuffer>}
+	 */
+	GLTFParser.prototype.loadBuffer = function ( bufferIndex ) {
 
-        return _material;
+		var bufferDef = this.json.buffers[ bufferIndex ];
+		var loader = this.fileLoader;
 
-      }.bind( this ));
+		if ( bufferDef.type && bufferDef.type !== 'arraybuffer' ) {
 
-    }.bind( this ));
+			throw new Error( 'THREE.GLTFLoader: ' + bufferDef.type + ' buffer type is not supported.' );
 
-  };
+		}
 
-  GLTFParser.prototype.loadMeshes = function() {
+		// If present, GLB container is required to be the first buffer.
+		if ( bufferDef.uri === undefined && bufferIndex === 0 ) {
 
-    return this._withDependencies([
-      "accessors",
-      "materials"
-    ]).then( function( dependencies ) {
+			return Promise.resolve( this.extensions[ EXTENSIONS.KHR_BINARY_GLTF ].body );
 
-      return _each( this.json.meshes, function( mesh, meshId ) {
+		}
 
-        var group = new THREE.Object3D();
-        group.name = mesh.name;
+		var options = this.options;
 
-        var primitives = mesh.primitives;
+		return new Promise( function ( resolve, reject ) {
 
-        _each( primitives, function( primitive ) {
+			loader.load( resolveURL( bufferDef.uri, options.path ), resolve, undefined, function () {
 
-          if ( primitive.mode === WEBGL_CONSTANTS.TRIANGLES || primitive.mode === undefined ) {
+				reject( new Error( 'THREE.GLTFLoader: Failed to load buffer "' + bufferDef.uri + '".' ) );
 
-            var geometry = new THREE.BufferGeometry();
+			} );
 
-            var attributes = primitive.attributes;
+		} );
 
-            _each( attributes, function( attributeEntry, attributeId ) {
+	};
 
-              if ( !attributeEntry ) {
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#buffers-and-buffer-views
+	 * @param {number} bufferViewIndex
+	 * @return {Promise<ArrayBuffer>}
+	 */
+	GLTFParser.prototype.loadBufferView = function ( bufferViewIndex ) {
 
-                return;
+		var bufferViewDef = this.json.bufferViews[ bufferViewIndex ];
 
-              }
+		return this.getDependency( 'buffer', bufferViewDef.buffer ).then( function ( buffer ) {
 
-              var bufferAttribute = dependencies.accessors[ attributeEntry ];
+			var byteLength = bufferViewDef.byteLength || 0;
+			var byteOffset = bufferViewDef.byteOffset || 0;
+			return buffer.slice( byteOffset, byteOffset + byteLength );
 
-              switch ( attributeId ) {
+		} );
 
-                case 'POSITION':
-                  geometry.addAttribute( 'position', bufferAttribute );
-                  break;
+	};
 
-                case 'NORMAL':
-                  geometry.addAttribute( 'normal', bufferAttribute );
-                  break;
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#accessors
+	 * @param {number} accessorIndex
+	 * @return {Promise<THREE.BufferAttribute|THREE.InterleavedBufferAttribute>}
+	 */
+	GLTFParser.prototype.loadAccessor = function ( accessorIndex ) {
 
-                case 'TEXCOORD_0':
-                case 'TEXCOORD0':
-                case 'TEXCOORD':
-                  geometry.addAttribute( 'uv', bufferAttribute );
-                  break;
+		var parser = this;
+		var json = this.json;
 
-                case 'WEIGHT':
-                  geometry.addAttribute( 'skinWeight', bufferAttribute );
-                  break;
+		var accessorDef = this.json.accessors[ accessorIndex ];
 
-                case 'JOINT':
-                  geometry.addAttribute( 'skinIndex', bufferAttribute );
-                  break;
+		var pendingBufferViews = [];
 
-              }
+		if ( accessorDef.bufferView !== undefined ) {
 
-            });
+			pendingBufferViews.push( this.getDependency( 'bufferView', accessorDef.bufferView ) );
 
-            if ( primitive.indices ) {
+		} else {
 
-              var indexArray = dependencies.accessors[ primitive.indices ];
+			pendingBufferViews.push( null );
 
-              geometry.setIndex( indexArray );
+		}
 
-              var offset = {
-                start: 0,
-                index: 0,
-                count: indexArray.count
-              };
+		if ( accessorDef.sparse !== undefined ) {
 
-              geometry.groups.push( offset );
+			pendingBufferViews.push( this.getDependency( 'bufferView', accessorDef.sparse.indices.bufferView ) );
+			pendingBufferViews.push( this.getDependency( 'bufferView', accessorDef.sparse.values.bufferView ) );
 
-              geometry.computeBoundingSphere();
+		}
 
-            }
+		return Promise.all( pendingBufferViews ).then( function ( bufferViews ) {
 
+			var bufferView = bufferViews[ 0 ];
 
-            var material = dependencies.materials[ primitive.material ];
+			var itemSize = WEBGL_TYPE_SIZES[ accessorDef.type ];
+			var TypedArray = WEBGL_COMPONENT_TYPES[ accessorDef.componentType ];
 
-            var meshNode = new THREE.Mesh( geometry, material );
-            meshNode.castShadow = true;
+			// For VEC3: itemSize is 3, elementBytes is 4, itemBytes is 12.
+			var elementBytes = TypedArray.BYTES_PER_ELEMENT;
+			var itemBytes = elementBytes * itemSize;
+			var byteOffset = accessorDef.byteOffset || 0;
+			var byteStride = json.bufferViews[ accessorDef.bufferView ].byteStride;
+			var normalized = accessorDef.normalized === true;
+			var array, bufferAttribute;
 
-            group.add( meshNode );
+			// The buffer is not interleaved if the stride is the item size in bytes.
+			if ( byteStride && byteStride !== itemBytes ) {
 
-          } else {
+				var ibCacheKey = 'InterleavedBuffer:' + accessorDef.bufferView + ':' + accessorDef.componentType;
+				var ib = parser.cache.get( ibCacheKey );
 
-            console.warn("Non-triangular primitives are not supported");
+				if ( ! ib ) {
 
-          }
+					// Use the full buffer if it's interleaved.
+					array = new TypedArray( bufferView );
 
-        });
+					// Integer parameters to IB/IBA are in array elements, not bytes.
+					ib = new THREE.InterleavedBuffer( array, byteStride / elementBytes );
 
-        return group;
+					parser.cache.add( ibCacheKey, ib );
 
-      });
+				}
 
-    }.bind( this ));
+				bufferAttribute = new THREE.InterleavedBufferAttribute( ib, itemSize, byteOffset / elementBytes, normalized );
 
-  };
+			} else {
 
-  GLTFParser.prototype.loadCameras = function() {
+				if ( bufferView === null ) {
 
-    return _each( this.json.cameras, function( camera, cameraId ) {
+					array = new TypedArray( accessorDef.count * itemSize );
 
-      if ( camera.type == "perspective" && camera.perspective ) {
+				} else {
 
-        var yfov = camera.perspective.yfov;
-        var xfov = camera.perspective.xfov;
-        var aspect_ratio = camera.perspective.aspect_ratio || 1;
+					array = new TypedArray( bufferView, byteOffset, accessorDef.count * itemSize );
 
-        // According to COLLADA spec...
-        // aspect_ratio = xfov / yfov
-        xfov = ( xfov === undefined && yfov ) ? yfov * aspect_ratio : xfov;
+				}
 
-        // According to COLLADA spec...
-        // aspect_ratio = xfov / yfov
-        // yfov = ( yfov === undefined && xfov ) ? xfov / aspect_ratio : yfov;
+				bufferAttribute = new THREE.BufferAttribute( array, itemSize, normalized );
 
-        var _camera = new THREE.PerspectiveCamera( THREE.Math.radToDeg( xfov ), aspect_ratio, camera.perspective.znear || 1, camera.perspective.zfar || 2e6 );
-        _camera.name = camera.name;
+			}
 
-        return _camera;
+			// https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#sparse-accessors
+			if ( accessorDef.sparse !== undefined ) {
 
-      } else if ( camera.type == "orthographic" && camera.orthographic ) {
+				var itemSizeIndices = WEBGL_TYPE_SIZES.SCALAR;
+				var TypedArrayIndices = WEBGL_COMPONENT_TYPES[ accessorDef.sparse.indices.componentType ];
 
-        var _camera = new THREE.OrthographicCamera( window.innerWidth / - 2, window.innerWidth / 2, window.innerHeight / 2, window.innerHeight / - 2, camera.orthographic.znear, camera.orthographic.zfar );
-        _camera.name = camera.name;
+				var byteOffsetIndices = accessorDef.sparse.indices.byteOffset || 0;
+				var byteOffsetValues = accessorDef.sparse.values.byteOffset || 0;
 
-        return _camera;
+				var sparseIndices = new TypedArrayIndices( bufferViews[ 1 ], byteOffsetIndices, accessorDef.sparse.count * itemSizeIndices );
+				var sparseValues = new TypedArray( bufferViews[ 2 ], byteOffsetValues, accessorDef.sparse.count * itemSize );
 
-      }
+				if ( bufferView !== null ) {
 
-    }.bind( this ));
+					// Avoid modifying the original ArrayBuffer, if the bufferView wasn't initialized with zeroes.
+					bufferAttribute.setArray( bufferAttribute.array.slice() );
 
-  };
+				}
 
-  GLTFParser.prototype.loadSkins = function() {
+				for ( var i = 0, il = sparseIndices.length; i < il; i ++ ) {
 
-    return this._withDependencies([
-      "accessors"
-    ]).then( function( dependencies ) {
+					var index = sparseIndices[ i ];
 
-      return _each( this.json.skins, function( skin, skinId ) {
+					bufferAttribute.setX( index, sparseValues[ i * itemSize ] );
+					if ( itemSize >= 2 ) bufferAttribute.setY( index, sparseValues[ i * itemSize + 1 ] );
+					if ( itemSize >= 3 ) bufferAttribute.setZ( index, sparseValues[ i * itemSize + 2 ] );
+					if ( itemSize >= 4 ) bufferAttribute.setW( index, sparseValues[ i * itemSize + 3 ] );
+					if ( itemSize >= 5 ) throw new Error( 'THREE.GLTFLoader: Unsupported itemSize in sparse BufferAttribute.' );
 
-        var _skin = {
-          bindShapeMatrix: new THREE.Matrix4().fromArray( skin.bindShapeMatrix ),
-          jointNames: skin.jointNames,
-          inverseBindMatrices: dependencies.accessors[ skin.inverseBindMatrices ]
-        };
+				}
 
-        return _skin;
+			}
 
-      });
+			return bufferAttribute;
 
-    }.bind( this ));
+		} );
 
-  };
+	};
 
-  GLTFParser.prototype.loadAnimations = function() {
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#textures
+	 * @param {number} textureIndex
+	 * @return {Promise<THREE.Texture>}
+	 */
+	GLTFParser.prototype.loadTexture = function ( textureIndex ) {
 
-    return this._withDependencies([
-      "accessors",
-      "nodes"
-    ]).then( function( dependencies ) {
+		var parser = this;
+		var json = this.json;
+		var options = this.options;
+		var textureLoader = this.textureLoader;
 
-      return _each( this.json.animations, function( animation, animationId ) {
+		var URL = window.URL || window.webkitURL;
 
-        var interps = [];
+		var textureDef = json.textures[ textureIndex ];
+		var source = json.images[ textureDef.source ];
+		var sourceURI = source.uri;
+		var isObjectURL = false;
 
-        _each( animation.channels, function( channel ) {
+		if ( source.bufferView !== undefined ) {
 
-          var sampler = animation.samplers[ channel.sampler ];
+			// Load binary image data from bufferView, if provided.
 
-          if (sampler && animation.parameters) {
+			sourceURI = parser.getDependency( 'bufferView', source.bufferView ).then( function ( bufferView ) {
 
-            var target = channel.target;
-            var name = target.id;
-            var input = animation.parameters[sampler.input];
-            var output = animation.parameters[sampler.output];
+				isObjectURL = true;
+				var blob = new Blob( [ bufferView ], { type: source.mimeType } );
+				sourceURI = URL.createObjectURL( blob );
+				return sourceURI;
 
-            var inputAccessor = dependencies.accessors[ input ];
-            var outputAccessor = dependencies.accessors[ output ];
+			} );
 
-            var node = dependencies.nodes[ name ];
+		}
 
-            if ( node ) {
+		return Promise.resolve( sourceURI ).then( function ( sourceURI ) {
 
-              var interp = {
-                keys : inputAccessor.array,
-                values : outputAccessor.array,
-                count : inputAccessor.count,
-                target : node,
-                path : target.path,
-                type : sampler.interpolation
-              };
+			// Load Texture resource.
 
-              interps.push( interp );
+			var loader = THREE.Loader.Handlers.get( sourceURI ) || textureLoader;
 
-            }
+			return new Promise( function ( resolve, reject ) {
 
-          }
+				loader.load( resolveURL( sourceURI, options.path ), resolve, undefined, reject );
 
-        });
+			} );
 
-        var _animation = new GLTFAnimation(interps);
-        _animation.name = "animation_" + animationId;
+		} ).then( function ( texture ) {
 
-        return _animation;
+			// Clean up resources and configure Texture.
 
-      });
+			if ( isObjectURL === true ) {
 
-    }.bind( this ));
+				URL.revokeObjectURL( sourceURI );
 
-  };
+			}
 
-  GLTFParser.prototype.loadNodes = function() {
+			texture.flipY = false;
 
-    return _each( this.json.nodes, function( node, nodeId ) {
+			if ( textureDef.name !== undefined ) texture.name = textureDef.name;
 
-      var matrix = new THREE.Matrix4();
+			texture.format = textureDef.format !== undefined ? WEBGL_TEXTURE_FORMATS[ textureDef.format ] : THREE.RGBAFormat;
 
-      var _node;
+			if ( textureDef.internalFormat !== undefined && texture.format !== WEBGL_TEXTURE_FORMATS[ textureDef.internalFormat ] ) {
 
-      if ( node.jointName ) {
+				console.warn( 'THREE.GLTFLoader: Three.js does not support texture internalFormat which is different from texture format. ' +
+											'internalFormat will be forced to be the same value as format.' );
 
-        _node = new THREE.Bone();
-        _node.jointName = node.jointName;
+			}
 
-      } else {
+			texture.type = textureDef.type !== undefined ? WEBGL_TEXTURE_DATATYPES[ textureDef.type ] : THREE.UnsignedByteType;
 
-        _node = new THREE.Object3D()
+			var samplers = json.samplers || {};
+			var sampler = samplers[ textureDef.sampler ] || {};
 
-      }
+			texture.magFilter = WEBGL_FILTERS[ sampler.magFilter ] || THREE.LinearFilter;
+			texture.minFilter = WEBGL_FILTERS[ sampler.minFilter ] || THREE.LinearMipMapLinearFilter;
+			texture.wrapS = WEBGL_WRAPPINGS[ sampler.wrapS ] || THREE.RepeatWrapping;
+			texture.wrapT = WEBGL_WRAPPINGS[ sampler.wrapT ] || THREE.RepeatWrapping;
 
-      _node.name = node.name;
+			return texture;
 
-      _node.matrixAutoUpdate = false;
+		} );
 
-      if ( node.matrix !== undefined ) {
+	};
 
-        matrix.fromArray( node.matrix );
-        _node.applyMatrix( matrix );
+	/**
+	 * Asynchronously assigns a texture to the given material parameters.
+	 * @param {Object} materialParams
+	 * @param {string} textureName
+	 * @param {number} textureIndex
+	 * @return {Promise}
+	 */
+	GLTFParser.prototype.assignTexture = function ( materialParams, textureName, textureIndex ) {
 
-      } else {
+		return this.getDependency( 'texture', textureIndex ).then( function ( texture ) {
 
-        if ( node.translation !== undefined ) {
+			materialParams[ textureName ] = texture;
 
-          _node.position.fromArray( node.translation );
+		} );
 
-        }
+	};
 
-        if ( node.rotation !== undefined ) {
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#materials
+	 * @param {number} materialIndex
+	 * @return {Promise<THREE.Material>}
+	 */
+	GLTFParser.prototype.loadMaterial = function ( materialIndex ) {
 
-          _node.quaternion.fromArray( node.rotation );
+		var parser = this;
+		var json = this.json;
+		var extensions = this.extensions;
+		var materialDef = this.json.materials[ materialIndex ];
 
-        }
+		var materialType;
+		var materialParams = {};
+		var materialExtensions = materialDef.extensions || {};
 
-        if ( node.scale !== undefined ) {
+		var pending = [];
 
-          _node.scale.fromArray( node.scale );
+		if ( materialExtensions[ EXTENSIONS.KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS ] ) {
 
-        }
+			var sgExtension = extensions[ EXTENSIONS.KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS ];
+			materialType = sgExtension.getMaterialType( materialDef );
+			pending.push( sgExtension.extendParams( materialParams, materialDef, parser ) );
 
-      }
+		} else if ( materialDef.pbrMetallicRoughness !== undefined ) {
 
-      return _node;
+			// Specification:
+			// https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#metallic-roughness-material
 
-    }.bind( this )).then( function( __nodes ) {
+			materialType = THREE.MeshStandardMaterial;
 
-      return this._withDependencies([
-        "meshes",
-        "skins",
-        "cameras",
-        "extensions"
-      ]).then( function( dependencies ) {
+			var metallicRoughness = materialDef.pbrMetallicRoughness;
 
-        return _each( __nodes, function( _node, nodeId ) {
+			materialParams.color = new THREE.Color( 1.0, 1.0, 1.0 );
+			materialParams.opacity = 1.0;
 
-          var node = this.json.nodes[ nodeId ];
+			if ( Array.isArray( metallicRoughness.baseColorFactor ) ) {
 
-          if ( node.meshes !== undefined ) {
+				var array = metallicRoughness.baseColorFactor;
 
-            _each( node.meshes, function( meshId ) {
+				materialParams.color.fromArray( array );
+				materialParams.opacity = array[ 3 ];
 
-              var group = dependencies.meshes[ meshId ];
+			}
 
-              _each( group.children, function( mesh ) {
+			if ( metallicRoughness.baseColorTexture !== undefined ) {
 
-                // clone Mesh to add to _node
+				pending.push( parser.assignTexture( materialParams, 'map', metallicRoughness.baseColorTexture.index ) );
 
-                var originalMaterial = mesh.material;
-                var originalGeometry = mesh.geometry;
+			}
 
-                var material;
-                if(originalMaterial.isDeferredShaderMaterial) {
-                  originalMaterial = material = originalMaterial.create();
-                } else {
-                  material = originalMaterial;
-                }
+			materialParams.metalness = metallicRoughness.metallicFactor !== undefined ? metallicRoughness.metallicFactor : 1.0;
+			materialParams.roughness = metallicRoughness.roughnessFactor !== undefined ? metallicRoughness.roughnessFactor : 1.0;
 
-                mesh = new THREE.Mesh( originalGeometry, material );
-                mesh.castShadow = true;
+			if ( metallicRoughness.metallicRoughnessTexture !== undefined ) {
 
-                var skinEntry;
-                if ( node.skin ) {
+				var textureIndex = metallicRoughness.metallicRoughnessTexture.index;
+				pending.push( parser.assignTexture( materialParams, 'metalnessMap', textureIndex ) );
+				pending.push( parser.assignTexture( materialParams, 'roughnessMap', textureIndex ) );
 
-                  skinEntry = dependencies.skins[ node.skin ];
+			}
 
-                }
+		} else {
 
-                // Replace Mesh with SkinnedMesh in library
-                if (skinEntry) {
+			materialType = THREE.MeshPhongMaterial;
 
-                  var geometry = originalGeometry;
-                  var material = originalMaterial;
-                  material.skinning = true;
+		}
 
-                  mesh = new THREE.SkinnedMesh( geometry, material, false );
-                  mesh.castShadow = true;
+		if ( materialDef.doubleSided === true ) {
 
-                  var bones = [];
-                  var boneInverses = [];
+			materialParams.side = THREE.DoubleSide;
 
-                  _each( skinEntry.jointNames, function( jointId, i ) {
+		}
 
-                    var jointNode = __nodes[ jointId ];
+		var alphaMode = materialDef.alphaMode || ALPHA_MODES.OPAQUE;
 
-                    if ( jointNode ) {
+		if ( alphaMode === ALPHA_MODES.BLEND ) {
 
-                      jointNode.skin = mesh;
-                      bones.push(jointNode);
+			materialParams.transparent = true;
 
-                      var m = skinEntry.inverseBindMatrices.array;
-                      var mat = new THREE.Matrix4().fromArray( m, i * 16 );
-                      boneInverses.push(mat);
+		} else {
 
-                    } else {
-                      console.warn( "WARNING: joint: ''" + jointId + "' could not be found" );
-                    }
+			materialParams.transparent = false;
 
-                  });
+			if ( alphaMode === ALPHA_MODES.MASK ) {
 
-                  mesh.bind( new THREE.Skeleton( bones, boneInverses, false ), skinEntry.bindShapeMatrix );
+				materialParams.alphaTest = materialDef.alphaCutoff !== undefined ? materialDef.alphaCutoff : 0.5;
 
-                }
+			}
 
-                _node.add( mesh );
+		}
 
-              });
+		if ( materialDef.normalTexture !== undefined ) {
 
-            });
+			pending.push( parser.assignTexture( materialParams, 'normalMap', materialDef.normalTexture.index ) );
 
-          }
+			materialParams.normalScale = new THREE.Vector2( 1, 1 );
 
-          if ( node.camera !== undefined ) {
+			if ( materialDef.normalTexture.scale !== undefined ) {
 
-            var camera = dependencies.cameras[ node.camera ];
+				materialParams.normalScale.set( materialDef.normalTexture.scale, materialDef.normalTexture.scale );
 
-            _node.add( camera );
+			}
 
-          }
+		}
 
-          if (node.extensions && node.extensions.KHR_materials_common
-            && node.extensions.KHR_materials_common.light) {
+		if ( materialDef.occlusionTexture !== undefined ) {
 
-            var light = dependencies.extensions.KHR_materials_common.lights[ node.extensions.KHR_materials_common.light ];
+			pending.push( parser.assignTexture( materialParams, 'aoMap', materialDef.occlusionTexture.index ) );
 
-            _node.add(light);
+			if ( materialDef.occlusionTexture.strength !== undefined ) {
 
-          }
+				materialParams.aoMapIntensity = materialDef.occlusionTexture.strength;
 
-          return _node;
+			}
 
-        }.bind( this ));
+		}
 
-      }.bind( this ));
+		if ( materialDef.emissiveFactor !== undefined ) {
 
-    }.bind( this ));
+			if ( materialType === THREE.MeshBasicMaterial ) {
 
-  };
+				materialParams.color = new THREE.Color().fromArray( materialDef.emissiveFactor );
 
-  GLTFParser.prototype.loadExtensions = function() {
+			} else {
 
-    return _each( this.json.extensions, function( extension, extensionId ) {
+				materialParams.emissive = new THREE.Color().fromArray( materialDef.emissiveFactor );
 
-      switch ( extensionId ) {
+			}
 
-        case "KHR_materials_common":
+		}
 
-          var extensionNode = {
-            lights: {}
-          };
+		if ( materialDef.emissiveTexture !== undefined ) {
 
-          var lights = extension.lights;
+			if ( materialType === THREE.MeshBasicMaterial ) {
 
-          _each( lights, function( light, lightID ) {
+				pending.push( parser.assignTexture( materialParams, 'map', materialDef.emissiveTexture.index ) );
 
-            var lightNode;
+			} else {
 
-            var lightParams = light[light.type];
-            var color = new THREE.Color().fromArray( lightParams.color );
+				pending.push( parser.assignTexture( materialParams, 'emissiveMap', materialDef.emissiveTexture.index ) );
 
-            switch ( light.type ) {
+			}
 
-              case "directional":
-                lightNode = new THREE.DirectionalLight( color );
-                lightNode.position.set( 0, 0, 1 );
-                break;
+		}
 
-              case "point":
-                lightNode = new THREE.PointLight( color );
-                break;
+		return Promise.all( pending ).then( function () {
 
-              case "spot ":
-                lightNode = new THREE.SpotLight( color );
-                lightNode.position.set( 0, 0, 1 );
-                break;
+			var material;
 
-              case "ambient":
-                lightNode = new THREE.AmbientLight( color );
-                break;
+			if ( materialType === THREE.ShaderMaterial ) {
 
-            }
+				material = extensions[ EXTENSIONS.KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS ].createMaterial( materialParams );
 
-            if ( lightNode ) {
+			} else {
 
-              extensionNode.lights[ lightID ] = lightNode;
+				material = new materialType( materialParams );
 
-            }
+			}
 
-          });
+			if ( materialDef.name !== undefined ) material.name = materialDef.name;
 
-          return extensionNode;
+			// Normal map textures use OpenGL conventions:
+			// https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#materialnormaltexture
+			if ( material.normalScale ) {
 
-          break;
+				material.normalScale.x = - material.normalScale.x;
 
-      }
+			}
 
-    }.bind( this ));
+			// emissiveTexture and baseColorTexture use sRGB encoding.
+			if ( material.map ) material.map.encoding = THREE.sRGBEncoding;
+			if ( material.emissiveMap ) material.emissiveMap.encoding = THREE.sRGBEncoding;
 
-  };
+			if ( materialDef.extras ) material.userData = materialDef.extras;
 
-  GLTFParser.prototype.loadScenes = function() {
+			return material;
 
-    // scene node hierachy builder
+		} );
 
-    var buildNodeHierachy = function( nodeId, parentObject, allNodes ) {
+	};
 
-      var _node = allNodes[ nodeId ];
-      parentObject.add( _node );
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#geometry
+	 * @param {Array<Object>} primitives
+	 * @return {Promise<Array<THREE.BufferGeometry>>}
+	 */
+	GLTFParser.prototype.loadGeometries = function ( primitives ) {
 
-      var node = this.json.nodes[ nodeId ];
+		var cache = this.primitiveCache;
 
-      if ( node.children ) {
+		return this.getDependencies( 'accessor' ).then( function ( accessors ) {
 
-        _each( node.children, function( child ) {
+			var geometries = [];
 
-          buildNodeHierachy( child, _node, allNodes );
+			for ( var i = 0, il = primitives.length; i < il; i ++ ) {
 
-        });
+				var primitive = primitives[ i ];
 
-      }
+				// See if we've already created this geometry
+				var cached = getCachedGeometry( cache, primitive );
 
-    }.bind( this );
+				if ( cached ) {
 
-    return this._withDependencies([
-      "nodes"
-    ]).then( function( dependencies ) {
+					// Use the cached geometry if it exists
+					geometries.push( cached );
 
-      return _each( this.json.scenes, function( scene, sceneId ) {
+				} else {
 
-        var _scene = new THREE.Scene();
-        _scene.name = scene.name;
+					// Otherwise create a new geometry
+					var geometry = new THREE.BufferGeometry();
 
-        _each( scene.nodes, function( nodeId ) {
+					var attributes = primitive.attributes;
 
-          buildNodeHierachy( nodeId, _scene, dependencies.nodes );
+					for ( var attributeId in attributes ) {
 
-        });
+						var attributeEntry = attributes[ attributeId ];
 
-        _scene.traverse( function( child ) {
+						var bufferAttribute = accessors[ attributeEntry ];
 
-          // Register raw material meshes with GLTFLoader.Shaders
-          if (child.material && child.material.isRawShaderMaterial) {
-            var xshader = new GLTFShader( child, dependencies.nodes );
-            THREE.GLTFLoader.Shaders.add( child.uuid, xshader );
-          }
+						switch ( attributeId ) {
 
-        });
+							case 'POSITION':
 
-        return _scene;
+								geometry.addAttribute( 'position', bufferAttribute );
+								break;
 
-      });
+							case 'NORMAL':
 
-    }.bind( this ));
+								geometry.addAttribute( 'normal', bufferAttribute );
+								break;
 
-  };
+							case 'TEXCOORD_0':
+							case 'TEXCOORD0':
+							case 'TEXCOORD':
 
-})();
+								geometry.addAttribute( 'uv', bufferAttribute );
+								break;
+
+							case 'TEXCOORD_1':
+
+								geometry.addAttribute( 'uv2', bufferAttribute );
+								break;
+
+							case 'COLOR_0':
+							case 'COLOR0':
+							case 'COLOR':
+
+								geometry.addAttribute( 'color', bufferAttribute );
+								break;
+
+							case 'WEIGHTS_0':
+							case 'WEIGHT': // WEIGHT semantic deprecated.
+
+								geometry.addAttribute( 'skinWeight', bufferAttribute );
+								break;
+
+							case 'JOINTS_0':
+							case 'JOINT': // JOINT semantic deprecated.
+
+								geometry.addAttribute( 'skinIndex', bufferAttribute );
+								break;
+
+						}
+
+					}
+
+					if ( primitive.indices !== undefined ) {
+
+						geometry.setIndex( accessors[ primitive.indices ] );
+
+					}
+
+					// Cache this geometry
+					cache.push( {
+
+						primitive: primitive,
+						geometry: geometry
+
+					} );
+
+					geometries.push( geometry );
+
+				}
+
+			}
+
+			return geometries;
+
+		} );
+
+	};
+
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#meshes
+	 * @param {number} meshIndex
+	 * @return {Promise<THREE.Group|THREE.Mesh|THREE.SkinnedMesh>}
+	 */
+	GLTFParser.prototype.loadMesh = function ( meshIndex ) {
+
+		var scope = this;
+		var json = this.json;
+		var extensions = this.extensions;
+
+		var meshDef = this.json.meshes[ meshIndex ];
+
+		return this.getMultiDependencies( [
+
+			'accessor',
+			'material'
+
+		] ).then( function ( dependencies ) {
+
+			var group = new THREE.Group();
+
+			var primitives = meshDef.primitives;
+
+			return scope.loadGeometries( primitives ).then( function ( geometries ) {
+
+				for ( var i = 0, il = primitives.length; i < il; i ++ ) {
+
+					var primitive = primitives[ i ];
+					var geometry = geometries[ i ];
+
+					var material = primitive.material === undefined
+						? createDefaultMaterial()
+						: dependencies.materials[ primitive.material ];
+
+					if ( material.aoMap
+							&& geometry.attributes.uv2 === undefined
+							&& geometry.attributes.uv !== undefined ) {
+
+						console.log( 'THREE.GLTFLoader: Duplicating UVs to support aoMap.' );
+						geometry.addAttribute( 'uv2', new THREE.BufferAttribute( geometry.attributes.uv.array, 2 ) );
+
+					}
+
+					// If the material will be modified later on, clone it now.
+					var useVertexColors = geometry.attributes.color !== undefined;
+					var useFlatShading = geometry.attributes.normal === undefined;
+					var useSkinning = meshDef.isSkinnedMesh === true;
+					var useMorphTargets = primitive.targets !== undefined;
+
+					if ( useVertexColors || useFlatShading || useSkinning || useMorphTargets ) {
+
+						if ( material.isGLTFSpecularGlossinessMaterial ) {
+
+							var specGlossExtension = extensions[ EXTENSIONS.KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS ];
+							material = specGlossExtension.cloneMaterial( material );
+
+						} else {
+
+							material = material.clone();
+
+						}
+
+					}
+
+					if ( useVertexColors ) {
+
+						material.vertexColors = THREE.VertexColors;
+						material.needsUpdate = true;
+
+					}
+
+					if ( useFlatShading ) {
+
+						material.flatShading = true;
+
+					}
+
+					var mesh;
+
+					if ( primitive.mode === WEBGL_CONSTANTS.TRIANGLES ||
+						primitive.mode === WEBGL_CONSTANTS.TRIANGLE_STRIP ||
+						primitive.mode === WEBGL_CONSTANTS.TRIANGLE_FAN ||
+						primitive.mode === undefined ) {
+
+						if ( useSkinning ) {
+
+							mesh = new THREE.SkinnedMesh( geometry, material );
+							material.skinning = true;
+
+						} else {
+
+							mesh = new THREE.Mesh( geometry, material );
+
+						}
+
+						if ( primitive.mode === WEBGL_CONSTANTS.TRIANGLE_STRIP ) {
+
+							mesh.drawMode = THREE.TriangleStripDrawMode;
+
+						} else if ( primitive.mode === WEBGL_CONSTANTS.TRIANGLE_FAN ) {
+
+							mesh.drawMode = THREE.TriangleFanDrawMode;
+
+						}
+
+					} else if ( primitive.mode === WEBGL_CONSTANTS.LINES ||
+						primitive.mode === WEBGL_CONSTANTS.LINE_STRIP ||
+						primitive.mode === WEBGL_CONSTANTS.LINE_LOOP ) {
+
+						var cacheKey = 'LineBasicMaterial:' + material.uuid;
+
+						var lineMaterial = scope.cache.get( cacheKey );
+
+						if ( ! lineMaterial ) {
+
+							lineMaterial = new THREE.LineBasicMaterial();
+							THREE.Material.prototype.copy.call( lineMaterial, material );
+							lineMaterial.color.copy( material.color );
+							lineMaterial.lights = false;  // LineBasicMaterial doesn't support lights yet
+
+							scope.cache.add( cacheKey, lineMaterial );
+
+						}
+
+						material = lineMaterial;
+
+						if ( primitive.mode === WEBGL_CONSTANTS.LINES ) {
+
+							mesh = new THREE.LineSegments( geometry, material );
+
+						} else if ( primitive.mode === WEBGL_CONSTANTS.LINE_STRIP ) {
+
+							mesh = new THREE.Line( geometry, material );
+
+						} else {
+
+							mesh = new THREE.LineLoop( geometry, material );
+
+						}
+
+					} else if ( primitive.mode === WEBGL_CONSTANTS.POINTS ) {
+
+						var cacheKey = 'PointsMaterial:' + material.uuid;
+
+						var pointsMaterial = scope.cache.get( cacheKey );
+
+						if ( ! pointsMaterial ) {
+
+							pointsMaterial = new THREE.PointsMaterial();
+							THREE.Material.prototype.copy.call( pointsMaterial, material );
+							pointsMaterial.color.copy( material.color );
+							pointsMaterial.map = material.map;
+							pointsMaterial.lights = false;  // PointsMaterial doesn't support lights yet
+
+							scope.cache.add( cacheKey, pointsMaterial );
+
+						}
+
+						material = pointsMaterial;
+
+						mesh = new THREE.Points( geometry, material );
+
+					} else {
+
+						throw new Error( 'THREE.GLTFLoader: Primitive mode unsupported: ' + primitive.mode );
+
+					}
+
+					mesh.name = meshDef.name || ( 'mesh_' + meshIndex );
+
+					if ( useMorphTargets ) {
+
+						addMorphTargets( mesh, meshDef, primitive, dependencies.accessors );
+
+					}
+
+					if ( meshDef.extras !== undefined ) mesh.userData = meshDef.extras;
+					if ( primitive.extras !== undefined ) mesh.geometry.userData = primitive.extras;
+
+					// for Specular-Glossiness.
+					if ( material.isGLTFSpecularGlossinessMaterial === true ) {
+
+						mesh.onBeforeRender = extensions[ EXTENSIONS.KHR_MATERIALS_PBR_SPECULAR_GLOSSINESS ].refreshUniforms;
+
+					}
+
+					if ( primitives.length > 1 ) {
+
+						mesh.name += '_' + i;
+
+						group.add( mesh );
+
+					} else {
+
+						return mesh;
+
+					}
+
+				}
+
+				return group;
+
+			} );
+
+		} );
+
+	};
+
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#cameras
+	 * @param {number} cameraIndex
+	 * @return {Promise<THREE.Camera>}
+	 */
+	GLTFParser.prototype.loadCamera = function ( cameraIndex ) {
+
+		var camera;
+		var cameraDef = this.json.cameras[ cameraIndex ];
+		var params = cameraDef[ cameraDef.type ];
+
+		if ( ! params ) {
+
+			console.warn( 'THREE.GLTFLoader: Missing camera parameters.' );
+			return;
+
+		}
+
+		if ( cameraDef.type === 'perspective' ) {
+
+			var aspectRatio = params.aspectRatio || 1;
+			var xfov = params.yfov * aspectRatio;
+
+			camera = new THREE.PerspectiveCamera( THREE.Math.radToDeg( xfov ), aspectRatio, params.znear || 1, params.zfar || 2e6 );
+
+		} else if ( cameraDef.type === 'orthographic' ) {
+
+			camera = new THREE.OrthographicCamera( params.xmag / - 2, params.xmag / 2, params.ymag / 2, params.ymag / - 2, params.znear, params.zfar );
+
+		}
+
+		if ( cameraDef.name !== undefined ) camera.name = cameraDef.name;
+		if ( cameraDef.extras ) camera.userData = cameraDef.extras;
+
+		return Promise.resolve( camera );
+
+	};
+
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#skins
+	 * @param {number} skinIndex
+	 * @return {Promise<Object>}
+	 */
+	GLTFParser.prototype.loadSkin = function ( skinIndex ) {
+
+		var skinDef = this.json.skins[ skinIndex ];
+
+		var skinEntry = { joints: skinDef.joints };
+
+		if ( skinDef.inverseBindMatrices === undefined ) {
+
+			return Promise.resolve( skinEntry );
+
+		}
+
+		return this.getDependency( 'accessor', skinDef.inverseBindMatrices ).then( function ( accessor ) {
+
+			skinEntry.inverseBindMatrices = accessor;
+
+			return skinEntry;
+
+		} );
+
+	};
+
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#animations
+	 * @param {number} animationIndex
+	 * @return {Promise<THREE.AnimationClip>}
+	 */
+	GLTFParser.prototype.loadAnimation = function ( animationIndex ) {
+
+		var json = this.json;
+
+		var animationDef = this.json.animations[ animationIndex ];
+
+		return this.getMultiDependencies( [
+
+			'accessor',
+			'node'
+
+		] ).then( function ( dependencies ) {
+
+			var tracks = [];
+
+			for ( var i = 0, il = animationDef.channels.length; i < il; i ++ ) {
+
+				var channel = animationDef.channels[ i ];
+				var sampler = animationDef.samplers[ channel.sampler ];
+
+				if ( sampler ) {
+
+					var target = channel.target;
+					var name = target.node !== undefined ? target.node : target.id; // NOTE: target.id is deprecated.
+					var input = animationDef.parameters !== undefined ? animationDef.parameters[ sampler.input ] : sampler.input;
+					var output = animationDef.parameters !== undefined ? animationDef.parameters[ sampler.output ] : sampler.output;
+
+					var inputAccessor = dependencies.accessors[ input ];
+					var outputAccessor = dependencies.accessors[ output ];
+
+					var node = dependencies.nodes[ name ];
+
+					if ( node ) {
+
+						node.updateMatrix();
+						node.matrixAutoUpdate = true;
+
+						var TypedKeyframeTrack;
+
+						switch ( PATH_PROPERTIES[ target.path ] ) {
+
+							case PATH_PROPERTIES.weights:
+
+								TypedKeyframeTrack = THREE.NumberKeyframeTrack;
+								break;
+
+							case PATH_PROPERTIES.rotation:
+
+								TypedKeyframeTrack = THREE.QuaternionKeyframeTrack;
+								break;
+
+							case PATH_PROPERTIES.position:
+							case PATH_PROPERTIES.scale:
+							default:
+
+								TypedKeyframeTrack = THREE.VectorKeyframeTrack;
+								break;
+
+						}
+
+						var targetName = node.name ? node.name : node.uuid;
+
+						var interpolation = sampler.interpolation !== undefined ? INTERPOLATION[ sampler.interpolation ] : THREE.InterpolateLinear;
+
+						var targetNames = [];
+
+						if ( PATH_PROPERTIES[ target.path ] === PATH_PROPERTIES.weights ) {
+
+							// node should be THREE.Group here but
+							// PATH_PROPERTIES.weights(morphTargetInfluences) should be
+							// the property of a mesh object under node.
+							// So finding targets here.
+
+							node.traverse( function ( object ) {
+
+								if ( object.isMesh === true && object.material.morphTargets === true ) {
+
+									targetNames.push( object.name ? object.name : object.uuid );
+
+								}
+
+							} );
+
+						} else {
+
+							targetNames.push( targetName );
+
+						}
+
+						// KeyframeTrack.optimize() will modify given 'times' and 'values'
+						// buffers before creating a truncated copy to keep. Because buffers may
+						// be reused by other tracks, make copies here.
+						for ( var j = 0, jl = targetNames.length; j < jl; j ++ ) {
+
+							var track = new TypedKeyframeTrack(
+								targetNames[ j ] + '.' + PATH_PROPERTIES[ target.path ],
+								THREE.AnimationUtils.arraySlice( inputAccessor.array, 0 ),
+								THREE.AnimationUtils.arraySlice( outputAccessor.array, 0 ),
+								interpolation
+							);
+
+							// Here is the trick to enable custom interpolation.
+							// Overrides .createInterpolant in a factory method which creates custom interpolation.
+							if ( sampler.interpolation === 'CUBICSPLINE' ) {
+
+								track.createInterpolant = function ( result ) {
+
+									// A CUBICSPLINE keyframe in glTF has three output values for each input value,
+									// representing inTangent, splineVertex, and outTangent. As a result, track.getValueSize()
+									// must be divided by three to get the interpolant's sampleSize argument.
+
+									return new GLTFCubicSplineInterpolant( this.times, this.values, this.getValueSize() / 3, result );
+
+								};
+
+							}
+
+							tracks.push( track );
+
+						}
+
+					}
+
+				}
+
+			}
+
+			var name = animationDef.name !== undefined ? animationDef.name : 'animation_' + animationIndex;
+
+			return new THREE.AnimationClip( name, undefined, tracks );
+
+		} );
+
+	};
+
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#nodes-and-hierarchy
+	 * @param {number} nodeIndex
+	 * @return {Promise<THREE.Object3D>}
+	 */
+	GLTFParser.prototype.loadNode = function ( nodeIndex ) {
+
+		var json = this.json;
+		var extensions = this.extensions;
+
+		var meshReferences = this.json.meshReferences;
+		var meshUses = this.json.meshUses;
+
+		var nodeDef = this.json.nodes[ nodeIndex ];
+
+		return this.getMultiDependencies( [
+
+			'mesh',
+			'skin',
+			'camera'
+
+		] ).then( function ( dependencies ) {
+
+			var node;
+
+			if ( nodeDef.isBone === true ) {
+
+				node = new THREE.Bone();
+
+			} else if ( nodeDef.mesh !== undefined ) {
+
+				var mesh = dependencies.meshes[ nodeDef.mesh ];
+
+				node = mesh.clone();
+
+				// for Specular-Glossiness
+				if ( mesh.isGroup === true ) {
+
+					for ( var i = 0, il = mesh.children.length; i < il; i ++ ) {
+
+						var child = mesh.children[ i ];
+
+						if ( child.material && child.material.isGLTFSpecularGlossinessMaterial === true ) {
+
+							node.children[ i ].onBeforeRender = child.onBeforeRender;
+
+						}
+
+					}
+
+				} else {
+
+					if ( mesh.material && mesh.material.isGLTFSpecularGlossinessMaterial === true ) {
+
+						node.onBeforeRender = mesh.onBeforeRender;
+
+					}
+
+				}
+
+				if ( meshReferences[ nodeDef.mesh ] > 1 ) {
+
+					node.name += '_instance_' + meshUses[ nodeDef.mesh ] ++;
+
+				}
+
+			} else if ( nodeDef.camera !== undefined ) {
+
+				node = dependencies.cameras[ nodeDef.camera ];
+
+			} else if ( nodeDef.extensions
+					 && nodeDef.extensions[ EXTENSIONS.KHR_LIGHTS ]
+					 && nodeDef.extensions[ EXTENSIONS.KHR_LIGHTS ].light !== undefined ) {
+
+				var lights = extensions[ EXTENSIONS.KHR_LIGHTS ].lights;
+				node = lights[ nodeDef.extensions[ EXTENSIONS.KHR_LIGHTS ].light ];
+
+			} else {
+
+				node = new THREE.Object3D();
+
+			}
+
+			if ( nodeDef.name !== undefined ) {
+
+				node.name = THREE.PropertyBinding.sanitizeNodeName( nodeDef.name );
+
+			}
+
+			if ( nodeDef.extras ) node.userData = nodeDef.extras;
+
+			if ( nodeDef.matrix !== undefined ) {
+
+				var matrix = new THREE.Matrix4();
+				matrix.fromArray( nodeDef.matrix );
+				node.applyMatrix( matrix );
+
+			} else {
+
+				if ( nodeDef.translation !== undefined ) {
+
+					node.position.fromArray( nodeDef.translation );
+
+				}
+
+				if ( nodeDef.rotation !== undefined ) {
+
+					node.quaternion.fromArray( nodeDef.rotation );
+
+				}
+
+				if ( nodeDef.scale !== undefined ) {
+
+					node.scale.fromArray( nodeDef.scale );
+
+				}
+
+			}
+
+			return node;
+
+		} );
+
+	};
+
+	/**
+	 * Specification: https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#scenes
+	 * @param {number} sceneIndex
+	 * @return {Promise<THREE.Scene>}
+	 */
+	GLTFParser.prototype.loadScene = function () {
+
+		// scene node hierachy builder
+
+		function buildNodeHierachy( nodeId, parentObject, json, allNodes, skins ) {
+
+			var node = allNodes[ nodeId ];
+			var nodeDef = json.nodes[ nodeId ];
+
+			// build skeleton here as well
+
+			if ( nodeDef.skin !== undefined ) {
+
+				var meshes = node.isGroup === true ? node.children : [ node ];
+
+				for ( var i = 0, il = meshes.length; i < il; i ++ ) {
+
+					var mesh = meshes[ i ];
+					var skinEntry = skins[ nodeDef.skin ];
+
+					var bones = [];
+					var boneInverses = [];
+
+					for ( var j = 0, jl = skinEntry.joints.length; j < jl; j ++ ) {
+
+						var jointId = skinEntry.joints[ j ];
+						var jointNode = allNodes[ jointId ];
+
+						if ( jointNode ) {
+
+							bones.push( jointNode );
+
+							var mat = new THREE.Matrix4();
+
+							if ( skinEntry.inverseBindMatrices !== undefined ) {
+
+								mat.fromArray( skinEntry.inverseBindMatrices.array, j * 16 );
+
+							}
+
+							boneInverses.push( mat );
+
+						} else {
+
+							console.warn( 'THREE.GLTFLoader: Joint "%s" could not be found.', jointId );
+
+						}
+
+					}
+
+					mesh.bind( new THREE.Skeleton( bones, boneInverses ), mesh.matrixWorld );
+
+				}
+
+			}
+
+			// build node hierachy
+
+			parentObject.add( node );
+
+			if ( nodeDef.children ) {
+
+				var children = nodeDef.children;
+
+				for ( var i = 0, il = children.length; i < il; i ++ ) {
+
+					var child = children[ i ];
+					buildNodeHierachy( child, node, json, allNodes, skins );
+
+				}
+
+			}
+
+		}
+
+		return function loadScene( sceneIndex ) {
+
+			var json = this.json;
+			var extensions = this.extensions;
+			var sceneDef = this.json.scenes[ sceneIndex ];
+
+			return this.getMultiDependencies( [
+
+				'node',
+				'skin'
+
+			] ).then( function ( dependencies ) {
+
+				var scene = new THREE.Scene();
+				if ( sceneDef.name !== undefined ) scene.name = sceneDef.name;
+
+				if ( sceneDef.extras ) scene.userData = sceneDef.extras;
+
+				var nodeIds = sceneDef.nodes || [];
+
+				for ( var i = 0, il = nodeIds.length; i < il; i ++ ) {
+
+					buildNodeHierachy( nodeIds[ i ], scene, json, dependencies.nodes, dependencies.skins );
+
+				}
+
+				// Ambient lighting, if present, is always attached to the scene root.
+				if ( sceneDef.extensions
+						 && sceneDef.extensions[ EXTENSIONS.KHR_LIGHTS ]
+						 && sceneDef.extensions[ EXTENSIONS.KHR_LIGHTS ].light !== undefined ) {
+
+					var lights = extensions[ EXTENSIONS.KHR_LIGHTS ].lights;
+					scene.add( lights[ sceneDef.extensions[ EXTENSIONS.KHR_LIGHTS ].light ] );
+
+				}
+
+				return scene;
+
+			} );
+
+		};
+
+	}();
+
+	return GLTFLoader;
+
+} )();
