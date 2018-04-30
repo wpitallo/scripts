@@ -276,7 +276,6 @@ class HttpConnection {
         return this.transport.send(data);
     }
     stop() {
-        debugger
         return __awaiter(this, void 0, void 0, function* () {
             let previousState = this.connectionState;
             this.connectionState = 3 /* Disconnected */;
@@ -290,7 +289,6 @@ class HttpConnection {
         });
     }
     stopConnection(raiseClosed, error) {
-        debugger
         if (this.transport) {
             this.transport.stop();
             this.transport = null;
@@ -423,7 +421,6 @@ class HubConnection {
         }
     }
     connectionClosed(error) {
-        debugger
         let errorCompletionMessage = {
             type: 3 /* Completion */,
             invocationId: "-1",
@@ -538,7 +535,6 @@ class HubConnection {
         }
     }
     onclose(callback) {
-        debugger
         if (callback) {
             this.closedCallbacks.push(callback);
         }
