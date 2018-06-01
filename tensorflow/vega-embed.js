@@ -1,7 +1,5 @@
 "use strict";
-if(exports == undefined){
-    exports = {}
-}
+let exports = {}
 
 Object.defineProperty(exports, "__esModule", { value: true });
 var versionCompare = require("compare-versions");
