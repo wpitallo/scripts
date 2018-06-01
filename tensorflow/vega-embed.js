@@ -150,7 +150,7 @@ function embed(el, spec, opt) {
         return Promise.reject(err);
     }
 }
-exports.default = embed;
+//exports.default = embed;
 function viewSource(source, sourceHeader, sourceFooter) {
     var header = "<html><head>" + sourceHeader + "</head>' + '<body><pre><code class=\"json\">";
     var footer = "</code></pre>" + sourceFooter + "</body></html>";
