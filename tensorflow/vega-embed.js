@@ -1,4 +1,8 @@
 "use strict";
+if(exports == undefined){
+    exports = {}
+}
+
 Object.defineProperty(exports, "__esModule", { value: true });
 var versionCompare = require("compare-versions");
 var d3 = require("d3-selection");
@@ -150,7 +154,7 @@ function embed(el, spec, opt) {
         return Promise.reject(err);
     }
 }
-//exports.default = embed;
+exports.default = embed;
 function viewSource(source, sourceHeader, sourceFooter) {
     var header = "<html><head>" + sourceHeader + "</head>' + '<body><pre><code class=\"json\">";
     var footer = "</code></pre>" + sourceFooter + "</body></html>";
