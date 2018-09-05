@@ -2661,25 +2661,27 @@ function initCanvas(w,h)
 
 
 function captureToCanvas() {
-    if(stype!=1)
-        return;
-    if(gUM)
-    {
-        try{
-            gCtx.drawImage(v,0,0);
-            try{
-                qrcode.decode();
-            }
-            catch(e){       
-                console.log(e);
-                setTimeout(captureToCanvas, 500);
-            };
-        }
-        catch(e){       
-                console.log(e);
-                setTimeout(captureToCanvas, 500);
-        };
-    }
+	if(window.QRScannerActive == true){
+	    if(stype!=1)
+		return;
+	    if(gUM)
+	    {
+		try{
+		    gCtx.drawImage(v,0,0);
+		    try{
+			qrcode.decode();
+		    }
+		    catch(e){       
+			console.log(e);
+			setTimeout(captureToCanvas, 500);
+		    };
+		}
+		catch(e){       
+			console.log(e);
+			setTimeout(captureToCanvas, 500);
+		};
+	    }
+	}
 }
 
 function htmlEntities(str) {
