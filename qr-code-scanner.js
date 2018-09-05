@@ -1396,29 +1396,31 @@ qrcode.vidError = function(a) {
 }
 ;
 qrcode.captureToCanvas = function() {
-    if (qrcode.gUM) {
-        try {
-            if (qrcode.video.videoWidth == 0) {
-                setTimeout(qrcode.captureToCanvas, 500);
-                return
-            } else {
-                qrcode.canvas_qr2.width = qrcode.video.videoWidth;
-                qrcode.canvas_qr2.height = qrcode.video.videoHeight
-            }
-            qrcode.qrcontext2.drawImage(qrcode.video, 0, 0);
-            try {
-                qrcode.decode()
-            } catch (a) {
-                console.log(a);
-                setTimeout(qrcode.captureToCanvas, 500)
-            }
-        } catch (a) {
-            console.log(a);
-            setTimeout(qrcode.captureToCanvas, 500)
-        }
-    }
-}
-;
+
+	if(window.QRScannerActive == true){
+		if (qrcode.gUM) {
+			try {
+			    if (qrcode.video.videoWidth == 0) {
+				setTimeout(qrcode.captureToCanvas, 500);
+				return
+			    } else {
+				qrcode.canvas_qr2.width = qrcode.video.videoWidth;
+				qrcode.canvas_qr2.height = qrcode.video.videoHeight
+			    }
+			    qrcode.qrcontext2.drawImage(qrcode.video, 0, 0);
+			    try {
+				qrcode.decode()
+			    } catch (a) {
+				console.log(a);
+				setTimeout(qrcode.captureToCanvas, 500)
+			    }
+			} catch (a) {
+			    console.log(a);
+			    setTimeout(qrcode.captureToCanvas, 500)
+			}
+    		}
+	}
+};
 qrcode.setWebcam = function(c) {
     var d = navigator;
     qrcode.video = document.getElementById(c);
